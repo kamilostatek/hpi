@@ -16,7 +16,7 @@ if [ -d "kamil" ]; then
   rm -Rf kami*
 fi
 echo -e "Pobieram nową wersję"
-wget -q https://github.com/kamilostatek/hpi/commit/67d0d8cdd5d00601e452555c6c474d381f864fea#diff-a88bebcc0e607c0d78a5bc63036cf256bc01029b3c9cd56c5b5beeeacf8888d8
+wget -q https://github.com/kamilostatek/hpi/raw/refs/heads/main/kamilV6.tar.gz
 echo -e "Rozpakowuje"
 tar -xzf kamilV6.tar.gz
 echo -e "Wyłączam usługę \033[34mHaierPi\033[0m"
