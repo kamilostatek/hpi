@@ -1,45 +1,77 @@
-from flask_simplelogin import SimpleLogin,is_logged_in,login_required, get_username
-from werkzeug.security import check_password_hash, generate_password_hash
-from schedule import every, run_pending, get_jobs, clear, cancel_job
-from flask import Flask, flash, render_template, request, session, jsonify, redirect, Markup, send_file, url_for
-from flask_babel import Babel, gettext
-from pymodbus.client.sync import ModbusSerialClient
-from w1thermsensor import W1ThermSensor
-from werkzeug.utils import secure_filename
+"""
+HaierPi – backend (Flask) do komunikacji z pompą ciepła Haier przez Modbus RTU.
+
+Cel tego pliku: możliwie prosty przepływ danych -> odczyt rejestrów -> parsowanie (PyHaier) -> UI.
+Komentarze są utrzymywane po polsku, a kod jest pogrupowany sekcjami, żeby łatwo było nawigować.
+"""
+
+# --- Importy: standard library ---
+import base64
 import collections
-import statistics
-import paho.mqtt.client as mqtt
-from termcolor import colored
-from waitress import serve
-from datetime import datetime
-from flask_socketio import SocketIO, emit
-from itertools import islice
-import socketio
-import HPi.GPIO as GPIO
 import configparser
-import subprocess
-import threading
-import requests
+from datetime import datetime
+import io
+import json
 import logging
+import math
+import os
+import pickle
+import signal
+import socket
+import subprocess
+import sys
+import threading
 import time
 import traceback
-import jinja2
-import pickle
-import PyHaier
 import urllib.request
-import socket
-import serial
-import signal
-import base64
-import json
-import time
-import sys
-import io
-import os
+from itertools import islice
 
-version="1.4beta10"
+# --- Importy: biblioteki zewnętrzne ---
+import jinja2
+import requests
+import serial
+import socketio
+import PyHaier
+import paho.mqtt.client as mqtt
+from flask import Flask, flash, jsonify, redirect, render_template, request, session, send_file, url_for, Markup
+from flask_babel import Babel, gettext
+from flask_simplelogin import SimpleLogin, get_username, is_logged_in, login_required
+from flask_socketio import SocketIO, emit
+from pymodbus.client.sync import ModbusSerialClient
+from schedule import cancel_job, clear, every, get_jobs, run_pending
+from termcolor import colored
+from waitress import serve
+from w1thermsensor import W1ThermSensor
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+
+# --- Importy: sprzęt / GPIO (RaspberryPi / HPi) ---
+import HPi.GPIO as GPIO
+
+
+# --- Sekcja: Globalne zmienne i konfiguracja ---
+
+services = []
+event = threading.Event()
+
+#NOWE Opóźnienie wyłączenia heatdemand w sekundach
+HEATDEMAND_OFF_DELAY_S = int(os.getenv("HEATDEMAND_OFF_DELAY_S", "30"))
+heatdemand_hi_since = None
+
+version="1.4.2a"
 ip_address=subprocess.run(['hostname', '-I'], check=True, capture_output=True, text=True).stdout.strip()
 welcome="\n┌────────────────────────────────────────┐\n│              "+colored("!!!Warning!!!", "red", attrs=['bold','blink'])+colored("             │\n│      This script is experimental       │\n│                                        │\n│ Products are provided strictly \"as-is\" │\n│ without any other warranty or guaranty │\n│              of any kind.              │\n└────────────────────────────────────────┘\n","yellow", attrs=['bold'])
+
+# --- Ograniczanie częstotliwości aktualizacji (throttling) ---
+# Minimalny odstęp czasu między przetworzeniami ramek (dla każdego typu bloku rejestrów).
+UPDATE_INTERVAL_SEC = 1.0
+# Minimalny odstęp czasu między dopisywaniem punktów do wykresów (żeby nie zasypywać UI/HA).
+CHART_INTERVAL_SEC = 1.0
+# Znaczniki czasu ostatniego przetworzenia (klucz = liczba rejestrów w ramce).
+_last_block_ts = {6: 0.0, 16: 0.0, 1: 0.0, 22: 0.0}
+# Znacznik czasu ostatniego dopisania punktów do wykresów.
+_last_chart_ts = 0.0
+
 config = configparser.ConfigParser()
 config.read('config.ini.repo')
 config.read('/opt/config.ini')
@@ -49,6 +81,8 @@ log_level_info = {'DEBUG': logging.DEBUG,
                     'ERROR': logging.ERROR,
                     }
 
+
+# --- Sekcja: Integracja z portalem HaierPi (opcjonalnie) ---
 SERVER_URL = "https://app.haierpi.pl"
 TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoyfQ.uNzcoMkLSOONHZAOeEWI1l2KEAnzeh0DuADajOrWfUw'
 sio_remote = socketio.Client(reconnection=True, reconnection_delay=1, reconnection_delay_max=10)
@@ -105,6 +139,8 @@ def loadconfig():
     insidetemp = config['SETTINGS']['insidetemp']
     global outsidetemp
     outsidetemp = config['SETTINGS']['outsidetemp']
+    global emergency_intemp
+    emergency_intemp = config['SETTINGS'].get('emergency_intemp', '20.0')
     global omlat
     omlat = config['SETTINGS']['omlat']
     global omlon
@@ -131,6 +167,8 @@ def loadconfig():
     dhwscheduler = config['SETTINGS']['dhwscheduler']
     global dhwwl
     dhwwl = config['SETTINGS']['dhwwl']
+    global dhwuse
+    dhwuse = config['SETTINGS'].get('dhwuse', '1')
     global kwhnowcorr 
     kwhnowcorr = config['SETTINGS']['kwhnowcorr']
     global lohysteresis
@@ -190,8 +228,32 @@ def loadconfig():
     global deltatempflimit
     deltatempflimit = config['SETTINGS']['deltatempflimit']
 
+    # NOWE --- Temperature zones---
+    global zone_frost_enable
+    zone_frost_enable = config['SETTINGS'].get('zone_frost_enable', '0')
+    global zone_frost_temp
+    zone_frost_temp = config['SETTINGS'].get('zone_frost_temp', '-99')
+    global zone_frost_mode
+    zone_frost_mode = config['SETTINGS'].get('zone_frost_mode', 'turbo')
+
+    global zone_warm_enable
+    zone_warm_enable = config['SETTINGS'].get('zone_warm_enable', '0')
+    global zone_warm_temp
+    zone_warm_temp = config['SETTINGS'].get('zone_warm_temp', '99')
+
+    # Warm zone behavior: user chooses either:
+    #   - 'quiet'        -> Quiet only (do not use flimit)
+    #   - 'quiet_flimit' -> Quiet + flimit controlled by delta (AOO)
+    global zone_warm_mode
+    zone_warm_mode = str(config['SETTINGS'].get('zone_warm_mode', 'quiet_flimit')).strip().lower()
+    # Backward compatibility (older setting name)
+    if zone_warm_mode == 'quiet_only':
+        zone_warm_mode = 'quiet'
+
 loadconfig()
 
+
+# Create the stop event early so worker threads can safely reference it
 def hpiapp(function='status'):
     if function == 'status':
         if hpiatstart == '1':
@@ -252,10 +314,16 @@ pdactchart=collections.deque(8640*[''], 8640)
 pssetchart=collections.deque(8640*[''], 8640)
 psactchart=collections.deque(8640*[''], 8640)
 eevlevelchart=collections.deque(8640*[''], 8640)
+fan1chart=collections.deque(8640*[''], 8640)
+fan2chart=collections.deque(8640*[''], 8640)
 tsatpdsetchart=collections.deque(8640*[''], 8640)
 tsatpdactchart=collections.deque(8640*[''], 8640)
 tsatpssetchart=collections.deque(8640*[''], 8640)
 tsatpsactchart=collections.deque(8640*[''], 8640)
+superheatchart=collections.deque(8640*[''], 8640)
+subcoolingchart=collections.deque(8640*[''], 8640)
+tdefchart=collections.deque(8640*[''], 8640)
+defrostchart=collections.deque(8640*[0], 8640)
 intempchart=collections.deque(8640*[''], 8640)
 outtempchart=collections.deque(8640*[''], 8640)
 humidchart=collections.deque(8640*[''], 8640)
@@ -269,13 +337,48 @@ modechart_turbo = collections.deque(8640*[0], 8640)
 threewaychart = collections.deque(8640*[''], 8640)
 try:
     with open('charts.pkl', 'rb') as f:
-        datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet , modechart_eco , modechart_turbo, threewaychart = pickle.load(f)
-except:
+        _charts_data = pickle.load(f)
+
+    if isinstance(_charts_data, (list, tuple)):
+        if len(_charts_data) == 29:
+            datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart = _charts_data
+        elif len(_charts_data) == 31:
+            datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart, superheatchart, subcoolingchart = _charts_data
+        elif len(_charts_data) == 33:
+            datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart, superheatchart, subcoolingchart, tdefchart, defrostchart = _charts_data
+        elif len(_charts_data) == 35:
+            # NOWE: dodane dwa wentylatory do wykresu (fan1chart, fan2chart)
+            datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, fan1chart, fan2chart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart, superheatchart, subcoolingchart, tdefchart, defrostchart = _charts_data
+        else:
+            raise ValueError(f"Unsupported charts.pkl format (len={len(_charts_data)})")
+    elif isinstance(_charts_data, dict):
+        # Optional future-proof format
+        datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart = [ _charts_data.get(k) for k in [
+            'datechart','tankchart','twichart','twochart','tdchart','tschart','thichart','thochart','taochart',
+            'pdsetchart','pdactchart','pssetchart','psactchart','eevlevelchart','tsatpdsetchart','tsatpdactchart',
+            'tsatpssetchart','tsatpsactchart','intempchart','outtempchart','humidchart','hcurvechart','fsetchart',
+            'factchart','flimitonchart','modechart_quiet','modechart_eco','modechart_turbo','threewaychart'
+        ] ]
+        # NOWE: wentylatory
+        fan1chart = _charts_data.get('fan1chart', fan1chart)
+        fan2chart = _charts_data.get('fan2chart', fan2chart)
+        # NOWE wykres przegrzania i dochłodzenia
+        superheatchart = _charts_data.get('superheatchart', superheatchart)
+        subcoolingchart = _charts_data.get('subcoolingchart', subcoolingchart)
+        # NOWE wykres Tdef i Defrost
+        tdefchart = _charts_data.get('tdefchart', tdefchart)
+        defrostchart = _charts_data.get('defrostchart', defrostchart)
+    else:
+        raise ValueError(f"Unsupported charts.pkl type: {type(_charts_data)}")
+except Exception:
     logging.error("Cannot load charts pickle")
+
 
 
 modbus =  ModbusSerialClient(method = "rtu", port=modbusdev,stopbits=1, bytesize=8, parity='E', baudrate=9600)
 ser = serial.Serial(port=modbusdev, baudrate = 9600, parity=serial.PARITY_EVEN,stopbits=serial.STOPBITS_ONE,bytesize=serial.EIGHTBITS,timeout=1)
+
+# --- Sekcja: Flask / API / UI ---
 app = Flask(__name__)
 babel = Babel()
 UPLOAD_FOLDER = '/opt/haier'
@@ -291,7 +394,7 @@ def make_session_permanent():
 set_log_level = log_level_info.get(loglevel, logging.ERROR)
 logging.getLogger().setLevel(set_log_level)
 flask_log=logging.getLogger('werkzeug')
-flask_log.setLevel(set_log_level)
+flask_log.setLevel(logging.WARNING)
 
 GPIO.setup(modbuspin, GPIO.OUT) #modbus
 GPIO.setup(freqlimitpin, GPIO.OUT) #freq limit
@@ -301,15 +404,27 @@ GPIO.setup(cooldemandpin, GPIO.OUT) # cool demand
 statusdict={
 'intemp':{'mqtt':'/intemp/state','value':'N.A.'},
 'outtemp':{'mqtt':'/outtemp/state','value':'N.A.'},
+		# Temperature read status (ok/forced/outdated)
+	'intemp_status':{'mqtt':'/details/intemp_status/state','value':'ok'},
+	'outtemp_status':{'mqtt':'/details/outtemp_status/state','value':'ok'},
+'intempsrc':{'mqtt':'/details/intempsrc/state','value':'N.A.'},
+'outtempsrc':{'mqtt':'/details/outtempsrc/state','value':'N.A.'},
+'intempage':{'mqtt':'/details/intempage/state','value':'0'},
+'outtempage':{'mqtt':'/details/outtempage/state','value':'0'},
+'intemptime':{'mqtt':'/details/intemptime/state','value':'0'},
+'outtemptime':{'mqtt':'/details/outtemptime/state','value':'0'},
+'tempzone':{'mqtt':'/details/tempzone/state','value':'normal'},
 'settemp':{'mqtt':'/temperature/state','value':settemp},
 'hcurve':{'mqtt':'/heatcurve','value':'N.A.'},
 'dhw':{'mqtt':'/dhw/temperature/state','value':'N.A.'},
 'tank':{'mqtt':'/dhw/curtemperature/state','value':'N.A.'},
 'mode':{'mqtt':'/preset_mode/state','value':'N.A.'},
 'humid':{'mqtt':'/humidity/state','value':'N.A.'},
-'pch':{'mqtt':'/mode/state','value':'N.A.'},
-'pdhw':{'mqtt':'/dhw/mode/state','value':'N.A.'},
-'pcool':{'mqtt':'/mode/state','value':'N.A.'},
+'pch':{'mqtt':'/details/pch/state','value':'off'},
+'pdhw':{'mqtt':'/details/pdhw/state','value':'off'},
+'pcool':{'mqtt':'/details/pcool/state','value':'off'},
+'defrost':{'mqtt':'/details/defrost/state','value':'off'},
+'tdef':{'mqtt':'/details/tdef/state','value':'N.A.'},
 'theme':{'mqtt':'0','value':'light'},
 'tdts':{'mqtt':'/details/tdts/state','value':'N.A.'},
 'archerror':{'mqtt':'/details/archerror/state','value':'N.A.'},
@@ -325,10 +440,11 @@ statusdict={
 'tsatps': {'mqtt':'/details/tsatps/state', 'value':'N.A.'},
 'superheat': {'mqtt':'/details/superheat/state', 'value':'N.A.'},
 'subcooling': {'mqtt':'/details/subcooling/state', 'value':'N.A.'},
+	'firmware': {'mqtt':'/details/firmware/state', 'value':'N.A.'},
 'threeway':{'mqtt':'/details/threeway/state','value':'N.A.'},
 'chkwhpd':{'mqtt':'/details/chkwhpd/state','value':'0'},
 'dhwkwhpd':{'mqtt':'/details/dhwkwhpd','value':'0'},
-'flimiton':{'mqtt':'/details/flimiton','value':'0'},
+'flimiton':{'mqtt':'/details/flimiton/state','value':'0'},
 'antionoff':{'mqtt': '/antionoff/state', 'value':'N.A'},
 'flimit':{'mqtt': '/flimit/state', 'value':'N.A'},
 'delta':{'mqtt':'/details/delta/state','value':'N.A.'},
@@ -349,29 +465,211 @@ twocheck=[0,0]
 last_check_time = 0
 last_mode_active_ts = 0
 
-# --- Inside temperature filtering / anti-glitch ---
-# DHT22/HA sometimes reports single-sample spikes; median filter removes outliers.
-INTEMP_MEDIAN_WINDOW = 3
-intemp_hist = collections.deque(maxlen=INTEMP_MEDIAN_WINDOW)
-
-# Turn OFF heat demand only after temperature stays above hi hysteresis for a while
-HEATDEMAND_OFF_DELAY_S = 60  # seconds
-heatdemand_hi_since = None
+# Track previous heatingcurve mode (for Direct sync)
+last_heatingcurve_mode = None
 
 
-def _filter_intemp(val, ndigits=2):
-    """Return filtered inside temperature (median of last N readings).
-    Keeps a stable float type in statusdict['intemp']['value'].
+# Zone tracking (for logging / avoiding redundant actions)
+_current_zone = None
+
+def _as_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def _as_int(x):
+    try:
+        return int(float(x))
+    except Exception:
+        return None
+
+def _get_emergency_intemp_value():
+    """Return emergency inside temperature from config (float) or None if invalid.
+
+    Intended as a fail-safe when no inside temperature is available after reboot / HA down.
     """
     try:
-        f = float(val)
+        v = float(emergency_intemp)
+        if not math.isfinite(v) or math.isnan(v):
+            return None
+        # sanity range for inside emergency (user configurable but clamp to safe limits)
+        if not (5.0 <= v <= 35.0):
+            return None
+        return round(v, 1)
     except Exception:
-        return val
-    intemp_hist.append(f)
+        return None
+
+
+# -----------------------------------------------------------------------------
+# Temperature status tracking (fallback + stale detection)
+#
+# Goal:
+# - Prefer configured source (DS18B20 / DHT22 / Home Assistant)
+# - If missing -> use last good value for up to 30 minutes
+# - If still missing -> for outtemp switch to Tao
+# - Expose state to UI via statusdict keys: intemp_status/outtemp_status + src + time (minutes since last change) + age (minutes since last real read)
+#
+TEMP_CACHE_MAX_AGE_SEC = 30 * 60
+
+_temp_primary = {
+    'intemp': {'value': None, 'ts': 0.0, 'src': None},
+    'outtemp': {'value': None, 'ts': 0.0, 'src': None},
+}
+
+def _set_temp_meta(key, status, src=None, age_sec=None):
+    """Update UI/meta fields for a temperature reading.
+
+    status: 'ok' | 'forced' | 'outdated'
+    src: string (e.g. 'dht22','ha','ds18b','cache','tao','emergency','missing')
+
+    UI wants to know how long the CURRENT status/source has been active.
+    We track that as "time" (minutes since last change of status/src).
+
+    Additionally we expose "age" as minutes since the last real measurement for the
+    currently displayed value (when available).
+    """
+    now = time.time()
+    st = _temp_primary.get(key, {})
+
+    # store meta state in _temp_primary under keys: meta_status/meta_src/meta_since
+    meta_status = st.get('meta_status')
+    meta_src = st.get('meta_src')
+    meta_since = float(st.get('meta_since') or 0.0)
+
+    if str(status) != str(meta_status) or str(src) != str(meta_src):
+        meta_since = now
+        st['meta_status'] = str(status)
+        st['meta_src'] = str(src) if src is not None else None
+        st['meta_since'] = meta_since
+
+    # Duration since this meta state became active
+    active_sec = max(0.0, now - meta_since) if meta_since else 0.0
+    active_min = int(active_sec // 60)
+
+    # Age of the currently displayed value (minutes since last real read)
+    if age_sec is None:
+        age_sec = _get_primary_age(key)
+    age_min = None
     try:
-        return round(statistics.median(intemp_hist), ndigits)
+        if age_sec is not None:
+            age_min = int(max(0.0, float(age_sec)) // 60)
     except Exception:
-        return round(f, ndigits)
+        age_min = None
+
+    # UI keys
+    try:
+        ischanged(f"{key}_status", str(status))
+    except Exception:
+        pass
+
+    if src is not None:
+        try:
+            ischanged(f"{key}src", str(src))
+        except Exception:
+            pass
+
+    # "time" = minutes since status/src became active
+    try:
+        ischanged(f"{key}time", str(active_min))
+    except Exception:
+        pass
+
+    # "age" = minutes since last measurement (optional; used by MQTT / debugging)
+    if age_min is not None:
+        try:
+            ischanged(f"{key}age", str(age_min))
+        except Exception:
+            pass
+
+def _update_primary_temp(key, value, src):
+    try:
+        f = float(value)
+        if not math.isfinite(f) or math.isnan(f):
+            return False
+    except Exception:
+        return False
+    _temp_primary[key]['value'] = round(f, 1)
+    _temp_primary[key]['ts'] = time.time()
+    _temp_primary[key]['src'] = src
+    _set_temp_meta(key, 'ok', src=src, age_sec=0)
+    return True
+
+def _get_primary_age(key):
+    ts = float(_temp_primary.get(key, {}).get('ts', 0.0) or 0.0)
+    if ts <= 0:
+        return None
+    return max(0.0, time.time() - ts)
+
+# NOWE - Get temp to Temperature zones
+def get_temp_zone(outtemp_value):
+    """Return active control zone based on outside temperature.
+
+    Zones:
+      - 'frost' if zone_frost_enable and Tzew <= zone_frost_temp
+      - 'warm'  if zone_warm_enable  and Tzew >= zone_warm_temp
+      - 'normal' otherwise
+
+    Frost has priority over warm if thresholds overlap.
+    """
+    try:
+        if outtemp_value is None:
+            return 'normal'
+        t = float(outtemp_value)
+    except Exception:
+        return 'normal'
+
+    try:
+        if str(zone_frost_enable) == '1' and isfloat(zone_frost_temp) and t <= float(zone_frost_temp):
+            return 'frost'
+    except Exception:
+        pass
+
+    try:
+        if str(zone_warm_enable) == '1' and isfloat(zone_warm_temp) and t >= float(zone_warm_temp):
+            return 'warm'
+    except Exception:
+        pass
+
+    return 'normal'
+
+# NOWE - Function to calculate superheating / subcooling
+def compute_superheat_subcooling(tdts, tsatps, tsatpd, thitho):
+    
+    def to_float(v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    Ts = to_float(tdts[1]) if isinstance(tdts, (list, tuple)) and len(tdts) > 1 else None
+    Thi = to_float(thitho[0]) if isinstance(thitho, (list, tuple)) and len(thitho) > 0 else None
+    TsatPs_act = to_float(tsatps[1]) if isinstance(tsatps, (list, tuple)) and len(tsatps) > 1 else None
+    TsatPd_act = to_float(tsatpd[1]) if isinstance(tsatpd, (list, tuple)) and len(tsatpd) > 1 else None
+
+    superheat = f"{abs(Ts - TsatPs_act):.1f}" if (Ts is not None and TsatPs_act is not None) else "N.A."
+    subcooling = f"{abs(TsatPd_act - Thi):.1f}" if (Thi is not None and TsatPd_act is not None) else "N.A."
+    return superheat, subcooling
+
+# NOWE - Get Defrosting temperature
+def update_defrost_state(threeway_value=None):
+    """Ustawia status 'defrost' na podstawie biblioteki (PyHaier).
+
+    W PyHaier stan odmrażania jest raportowany jako stan zaworu 3-drogowego:
+    threeway == 'DEFROST' => defrost ON.
+
+    """
+    if threeway_value is None:
+        threeway_value = statusdict.get("threeway", {}).get("value", "N.A.")
+
+    cand = str(threeway_value).strip().upper() == "DEFROST"
+    cur = str(statusdict.get("defrost", {}).get("value", "off")).strip().lower()
+
+    if cand and cur != "on":
+        ischanged("defrost", "on")
+    elif (not cand) and cur != "off":
+        ischanged("defrost", "off")
+
 
 
 def get_locale():
@@ -387,7 +685,7 @@ def handler(signum, frame):
     logging.info("writing charts to file")
     
     with open('charts.pkl', 'wb') as f:
-        pickle.dump([datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart], f)
+        pickle.dump([datechart, tankchart, twichart, twochart, tdchart, tschart, thichart, thochart, taochart, pdsetchart, pdactchart, pssetchart, psactchart, eevlevelchart, fan1chart, fan2chart, tsatpdsetchart, tsatpdactchart, tsatpssetchart, tsatpsactchart, intempchart, outtempchart, humidchart, hcurvechart, fsetchart, factchart, flimitonchart, modechart_quiet, modechart_eco, modechart_turbo, threewaychart, superheatchart, subcoolingchart, tdefchart, defrostchart], f)
 
     GPIO.cleanup(modbuspin)
     GPIO.cleanup(freqlimitpin)
@@ -415,7 +713,7 @@ def isfloat(num):
     try:
         float(num)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 def check_my_users(user):
@@ -451,18 +749,20 @@ def gpiocontrol(control, value):
             GPIO.output(freqlimitpin, GPIO.LOW)
 
 def queue_pub(dtopic, value):
+    """Queue/publish value to all MQTT clients.
+    Must be safe to call before MQTT thread finishes init."""
     global services
-    ctopic=['pdhw', 'pch']
-    for clnt in services:
+    try:
+        clients = services
+    except NameError:
+        clients = []
+    for clnt in list(clients):
         try:
-            if dtopic in ctopic:
-                value=value.replace('on','heat')
-            if dtopic == 'pcool':
-                value=value.replace('on','cool')
-            topic=str(clnt._client_id.decode()+statusdict[dtopic]['mqtt'])
+            topic = str(clnt._client_id.decode() + statusdict[dtopic]['mqtt'])
             clnt.publish(topic, str(value), qos=1, retain=True)
         except:
             logging.error("MQTT: cannot publish "+dtopic)
+
 
 
 def WritePump(newframe): #rewrited
@@ -550,7 +850,10 @@ def ReadPump():
                             D101.append(m)
                             D101.append(l)
                     R101=T101
-                    threading.Thread(target=GetParametersNEW, args=(R101,), daemon=True).start()
+                    now_ts = time.time()
+                    if now_ts - _last_block_ts[6] >= UPDATE_INTERVAL_SEC:
+                        _last_block_ts[6] = now_ts
+                        threading.Thread(target=GetParametersNEW, args=(R101,), daemon=True).start()
                     logging.debug(D101)
                 if rs == "0320":
                     T141 = []
@@ -563,7 +866,10 @@ def ReadPump():
                             D141.append(m)
                             D141.append(l)
                     R141=T141
-                    threading.Thread(target=GetParametersNEW, args=(R141,), daemon=True).start()
+                    now_ts = time.time()
+                    if now_ts - _last_block_ts[16] >= UPDATE_INTERVAL_SEC:
+                        _last_block_ts[16] = now_ts
+                        threading.Thread(target=GetParametersNEW, args=(R141,), daemon=True).start()
                     logging.debug(D141)
                 if rs == "0302":
                     T201 = []
@@ -573,7 +879,10 @@ def ReadPump():
                             T201.append(int(rs, 16))
                     logging.debug(R201)
                     R201=T201
-                    threading.Thread(target=GetParametersNEW, args=(R201,), daemon=True).start()
+                    now_ts = time.time()
+                    if now_ts - _last_block_ts[1] >= UPDATE_INTERVAL_SEC:
+                        _last_block_ts[1] = now_ts
+                        threading.Thread(target=GetParametersNEW, args=(R201,), daemon=True).start()
                 if rs == "032c":
                     T241 = []
                     D241 = []
@@ -585,7 +894,10 @@ def ReadPump():
                             D241.append(m)
                             D241.append(l)
                     R241=T241
-                    threading.Thread(target=GetParametersNEW, args=(R241,), daemon=True).start()
+                    now_ts = time.time()
+                    if now_ts - _last_block_ts[22] >= UPDATE_INTERVAL_SEC:
+                        _last_block_ts[22] = now_ts
+                        threading.Thread(target=GetParametersNEW, args=(R241,), daemon=True).start()
                     logging.debug(D241)
         except:
             logging.error("ERROR ReadPump:")
@@ -806,6 +1118,7 @@ def statechange(mode,value,mqtt):
 
     global R101
     pcool=statusdict['pcool']['value']
+    defrost=statusdict.get('defrost', {}).get('value','off')
     pch=statusdict['pch']['value']
     pdhw=statusdict['pdhw']['value']
     newstate=""
@@ -850,30 +1163,58 @@ def curvecalc():
     settemp = None
     heatcurve = None
 
+    # NOWE Pause curve calculation during defrost (disturbance)
+    try:
+        _threeway = str(statusdict.get('threeway', {}).get('value', '')).strip().upper()
+        _defrost = str(statusdict.get('defrost', {}).get('value', 'off')).strip().lower()
+        if _threeway == 'DEFROST' or _defrost == 'on':
+            logging.info('Defrost active: pausing curvecalc')
+            return statusdict.get('hcurve', {}).get('value', None)
+    except Exception:
+        pass
+
     if expert_mode == "1":
         mintemp=float(20)
         maxtemp=float(55)
     else:
         mintemp=float(25)
         maxtemp=float(55)
-    # ---- Inside temperature (already filtered at the source) ----
     if isfloat(statusdict['intemp']['value']):
         insidetemp = float(statusdict['intemp']['value'])
-    # ----
     if isfloat(statusdict['outtemp']['value']):
         outsidetemp=float(statusdict['outtemp']['value'])
     if isfloat(statusdict['settemp']['value']):
         settemp=float(statusdict['settemp']['value'])
     global heatingcurve
+
+    # Safety: if required inputs are missing, do not proceed (avoids TypeError crashes)
+    if heatingcurve in ('auto', 'static', 'manual'):
+        if outsidetemp is None or settemp is None or (heatingcurve == 'auto' and insidetemp is None):
+            logging.warning(f"curvecalc: missing temp input(s) (int={insidetemp}, out={outsidetemp}, set={settemp}); skipping")
+            return statusdict.get('hcurve', {}).get('value', None)
+    # Direct mode:
+    # On switch to Direct -> copy last heatcurve to settemp ONCE,
+    # then allow manual +/- regulation via settemp.
+    global last_heatingcurve_mode
     if heatingcurve == 'directly':
-        heatcurve=settemp
+        if last_heatingcurve_mode != 'directly':
+            try:
+                _hc = statusdict.get('hcurve', {}).get('value', None)
+                if _hc is not None and isfloat(_hc):
+                    # update settemp (UI + config), do NOT send CH frame yet
+                    new_tempchange('heat', float(_hc), '0')
+            except Exception:
+                logging.exception("Direct sync: failed to copy hcurve to settemp")
+        last_heatingcurve_mode = 'directly'
+        return statusdict.get('hcurve', {}).get('value', None)
     elif heatingcurve == 'auto':
         t1=(outsidetemp/(320-(outsidetemp*4)))
         t2=pow(settemp,t1)
         sslope=float(slope)
         ps=float(pshift)
         amp=float(hcamp)
-        heatcurve = round((((0.55*sslope*t2)*(((-outsidetemp+20)*2)+settemp+ps)+((settemp-insidetemp)*amp))+ps)*2)/2
+        _hc = ((0.55*sslope*t2)*(((-outsidetemp+20)*2)+settemp+ps)+((settemp-insidetemp)*amp))+ps
+        heatcurve = round(_hc*2)/2
     elif heatingcurve == 'static':
         sslope=float(slope)
         heatcurve = round((settemp+(sslope*20)*pow(((settemp-outsidetemp)/20), 0.7))*2)/2
@@ -910,8 +1251,62 @@ def curvecalc():
         else:
             logging.warning("Cannot calculate 'manual' heatcurve, no outside temperature reading.")
 
-    queue_pub('hcurve', heatcurve)
-    #thermostat mode
+    # Safety: if heatcurve still not calculated, keep last value and exit
+    if heatcurve is None:
+        logging.warning("curvecalc: heatcurve is None -> keep last and skip control")
+        return statusdict.get('hcurve', {}).get('value', None)
+
+    # NOWE Temperature zones logic
+    global _current_zone
+    zone = get_temp_zone(outsidetemp)
+    if zone != _current_zone:
+        logging.info(f"TempZone: {_current_zone} -> {zone} (outtemp={outsidetemp})")
+        _current_zone = zone
+
+    # Zone 1: Frost - continuous work without thermostat & without Anti ON-OFF mode changes and without flimit
+    if zone == 'frost':
+        # Force selected preset mode
+        try:
+            desired_mode = str(zone_frost_mode).strip().lower()
+            if desired_mode not in ('turbo','eco','quiet'):
+                desired_mode = 'turbo'
+            current_mode = str(statusdict.get('mode', {}).get('value', '')).strip().lower()
+            if current_mode != desired_mode:
+                logging.info(f"TempZone(frost): forcing mode {desired_mode}")
+                new_presetchange(desired_mode)
+        except Exception as e:
+            logging.warning(f"TempZone(frost): cannot set mode: {e}")
+
+        # Ensure flimit relay is OFF (zone frost ignores FLimit completely)
+        try:
+            _flimiton = str(statusdict.get('flimiton', {}).get('value', '0'))
+            if _flimiton == '1':
+                logging.info('TempZone(frost): forcing OFF frequency limit relay')
+                flimitchange('0')
+        except Exception as e:
+            logging.warning(f"TempZone(frost): cannot control flimit relay: {e}")
+
+        # Force heat demand ON (ignore thermostat), but keep safety range check
+        heatdemand_hi_since = None
+        if mintemp <= heatcurve <= maxtemp:
+            try:
+                if GPIO.input(heatdemandpin) != 1:
+                    logging.info('TempZone(frost): Turn on heat demand (forced)')
+                    gpiocontrol('heatdemand', '1')
+                if str(statusdict.get('hcurve', {}).get('value')) != str(heatcurve):
+                    new_tempchange('heat', heatcurve, '1')
+            except Exception:
+                logging.error('TempZone(frost): Set chtemp ERROR')
+        else:
+            if GPIO.input(heatdemandpin) != 0:
+                logging.info('TempZone(frost): Turn off heat demand (heatcurve out of range)')
+                gpiocontrol('heatdemand', '0')
+
+        ischanged('hcurve', heatcurve)
+        last_heatingcurve_mode = heatingcurve
+    return heatcurve
+
+    # Thermostat mode
     if mintemp <= heatcurve <= maxtemp:
         if insidetemp is not None and isfloat(insidetemp):
             low_th  = settemp - float(lohysteresis)
@@ -922,7 +1317,7 @@ def curvecalc():
                 heatdemand_hi_since = None
                 try:
                     if GPIO.input(heatdemandpin) != 1:
-                        logging.info("turn on heat demand")
+                        logging.info("Turn on heat demand")
                         gpiocontrol("heatdemand", "1")
                     if str(statusdict['hcurve']['value']) != str(heatcurve):
                         new_tempchange("heat", heatcurve, "1")
@@ -936,7 +1331,7 @@ def curvecalc():
                     heatdemand_hi_since = now_ts
                 elif (now_ts - heatdemand_hi_since) >= HEATDEMAND_OFF_DELAY_S:
                     if GPIO.input(heatdemandpin) != 0:
-                        logging.info("turn off heat demand (confirmed)")
+                        logging.info("Turn off heat demand (confirmed)")
                         gpiocontrol("heatdemand", "0")
 
             else:
@@ -945,25 +1340,24 @@ def curvecalc():
     else:
         heatdemand_hi_since = None
         if GPIO.input(heatdemandpin) != 0:
-            logging.info("turn off heat demand")
+            logging.info("Turn off heat demand")
             gpiocontrol("heatdemand", "0")
-    #statusdict['hcurve']['value']=heatcurve
     ischanged("hcurve", heatcurve)
     threeway=statusdict['threeway']['value']
     compinfo=statusdict['compinfo']['value']
     pdhw=statusdict['pdhw']['value']
     if len(compinfo) > 0:
         if dhwwl=="1" and compinfo[0] != 0 and threeway == "DHW":
-            logging.info("dont change flimit in DHW mode")
+            logging.info("Dont change flimit in DHW mode")
         else:
-            if flimit == "auto" and antionoff != "1" and pdhw == 'off':
+            if flimit == "auto" and antionoff != "1" and get_temp_zone(outsidetemp) != 'frost':
                 if outsidetemp >= float(flimittemp):
-                    logging.info("turn on freq limit")
+                    logging.info("Turn on freq limit")
                     flimitchange("1")
                 elif outsidetemp <= float(flimittemp)+0.5:
-                    logging.info("turn off freq limit")
+                    logging.info("Turn off freq limit")
                     flimitchange("0")
-            if presetautochange == "auto" and antionoff != "1" and pdhw == 'off':
+            if presetautochange == "auto" and antionoff != "1" and get_temp_zone(outsidetemp) != 'frost':
                 mode=statusdict['mode']['value']
                 if outsidetemp >= float(presetquiet) and mode != "quiet":
                     new_presetchange("quiet")
@@ -971,6 +1365,7 @@ def curvecalc():
                     new_presetchange("turbo")
                 elif outsidetemp > float(presetturbo) and outsidetemp < float(presetquiet) and mode != "eco":
                     new_presetchange("eco")
+    last_heatingcurve_mode = heatingcurve
     return heatcurve
 
 def updatecheck():
@@ -989,17 +1384,21 @@ def restart():
 def getparams():
     isr241=1
     isr141=1
+    r241_raw = None
     while (isr241):
         if (len(R241) == 22):
-            tdts=PyHaier.GetTdTs(R241)
-            archerror=PyHaier.GetArchError(R241)
-            compinfo=PyHaier.GetCompInfo(R241)
-            fans=PyHaier.GetFanRpm(R241)
-            pdps=PyHaier.GetPdPs(R241)
-            eevlevel=PyHaier.GetEEVLevel(R241)
-            tsatpd=PyHaier.GetTSatPd(R241)
-            tsatps=PyHaier.GetTSatPs(R241)
-            tao=PyHaier.GetTao(R241)
+            # Snapshot raw registers before any helper mutates the list
+            r241_raw = list(R241)
+            r241_work = list(r241_raw)
+            tdts=PyHaier.GetTdTs(r241_work)
+            archerror=PyHaier.GetArchError(r241_work)
+            compinfo=PyHaier.GetCompInfo(r241_work)
+            fans=PyHaier.GetFanRpm(r241_work)
+            pdps=PyHaier.GetPdPs(r241_work)
+            eevlevel=PyHaier.GetEEVLevel(r241_work)
+            tsatpd=PyHaier.GetTSatPd(r241_work)
+            tsatps=PyHaier.GetTSatPs(r241_work)
+            tao=PyHaier.GetTao(r241_work)
             isr241=0
     while (isr141):
         if (len(R141) == 16):
@@ -1010,35 +1409,26 @@ def getparams():
             isr141=0
     chkwhpd=statusdict['chkwhpd']['value']
     dhwkwhpd=statusdict['dhwkwhpd']['value']
-
     
-    def _to_float(v):
-        try:
-            return float(v)
-        except Exception:
-            return None
+    # NOWE Superheat/Subcooling: bierzemy z cache (statusdict), żeby nie liczyć drugi raz w /getparams
+    superheat = statusdict.get('superheat', {}).get('value', 'N.A.')
+    subcooling = statusdict.get('subcooling', {}).get('value', 'N.A.')
+    firmware = statusdict.get('firmware', {}).get('value', 'N.A.')
+    if (firmware == "N.A." or firmware is None) and r241_raw is not None and len(r241_raw) == 22:
+        firmware = PyHaier.GetFirmware(r241_raw)
 
-    # NOWE - Liczenie przegrzania i dochłodzenia
-    Ts = _to_float(tdts[1]) if isinstance(tdts, (list, tuple)) and len(tdts) > 1 else None  
-    Thi = _to_float(thitho[0]) if isinstance(thitho, (list, tuple)) and len(thitho) > 1 else None
-    TsatPs_act = _to_float(tsatps[1]) if isinstance(tsatps, (list, tuple)) and len(tsatps) > 1 else None
-    TsatPd_act = _to_float(tsatpd[1]) if isinstance(tsatpd, (list, tuple)) and len(tsatpd) > 1 else None
-
-    superheat  = f"{abs(Ts - TsatPs_act):.1f}" if (Ts is not None and TsatPs_act is not None) else "N.A."
-    subcooling = f"{abs(TsatPd_act - Thi):.1f}" if (Thi is not None and TsatPd_act is not None) else "N.A."
-
-    return twitwo, thitho, tdts, archerror, compinfo, fans, pdps, eevlevel, tsatpd, tsatps, tao, pump, threeway, chkwhpd, dhwkwhpd, superheat, subcooling
+    return twitwo, thitho, tdts, archerror, compinfo, fans, pdps, eevlevel, tsatpd, tsatps, tao, pump, threeway, chkwhpd, dhwkwhpd, superheat, subcooling, firmware
 
 def getdata():
-    heatdemand=GPIO.input(heatdemandpin)
-    cooldemand=GPIO.input(cooldemandpin)
-    flimiton=GPIO.input(freqlimitpin)
+    heatdemand = GPIO.input(heatdemandpin)
+    cooldemand = GPIO.input(cooldemandpin)
+    flimiton = GPIO.input(freqlimitpin)
+    flrelay = flimiton
     
-    compinfo=statusdict['compinfo']['value']
-    flrelay=statusdict['flrelay']['value']
-    flimiton=statusdict['flimiton']['value']
+    compinfo = statusdict['compinfo']['value']
     intemp=statusdict['intemp']['value']
     outtemp=statusdict['outtemp']['value']
+    tempzone = get_temp_zone(outtemp)
     stemp=statusdict['settemp']['value']
     hcurve=statusdict['hcurve']['value']
     dhw=statusdict['dhw']['value']
@@ -1050,6 +1440,9 @@ def getdata():
     pcool=statusdict['pcool']['value']
     presetch = presetautochange 
     ltemp=flimittemp
+    # NOWE - Tdef i Defrost
+    defrost=statusdict.get('defrost', {}).get('value', 'off')
+    tdef=statusdict.get('tdef', {}).get('value', 'N.A.')
     
     heatingcurve=config['SETTINGS']['heatingcurve']
     flimit = config['SETTINGS']['flimit']
@@ -1064,9 +1457,11 @@ def getdata():
     ischanged("deltatempflimit", deltatempflimit)
     ischanged("heatdemand", heatdemand)
     ischanged("cooldemand", cooldemand)
-    ischanged("flrelay", flimiton)
+    ischanged("flrelay", flrelay)
     ischanged("pch", pch)
     ischanged("pcool", pcool)
+    ischanged("defrost", defrost)
+    ischanged("tdef", tdef)
     ischanged("pdhw", pdhw)
     ischanged("antionoff", antionoff)
     ischanged("antionoffdeltatime", antionoffdeltatime)
@@ -1077,22 +1472,22 @@ def getdata():
     ischanged("intemp", intemp)
     ischanged("mode", mode)
     ischanged("outtemp", outtemp)
-    ischanged("settemp", stemp)  # bo setpoint = stemp
+    ischanged("tempzone", tempzone)
+    ischanged("settemp", stemp)
     ischanged("tank", tank)
 
 
     
-    return jsonify(intemp=intemp, outtemp=outtemp, setpoint=stemp, hcurve=hcurve, dhw=dhw, tank=tank, mode=mode, humid=humid, pch=pch, pdhw=pdhw, pcool=pcool, flimit=flimit, heatdemand=heatdemand,cooldemand=cooldemand, flimiton=flimiton, ltemp=ltemp, presetch=presetch, presetquiet=presetquiet, presetturbo=presetturbo, heatingcurve=heatingcurve, deltatempturbo=deltatempturbo, deltatempquiet = deltatempquiet, deltatempflimit=deltatempflimit, antionoffdeltatime=antionoffdeltatime, delta=delta, antionoff=antionoff, compinfo=compinfo, flrelay=flrelay)
+    return jsonify(intemp=intemp, outtemp=outtemp, setpoint=stemp, hcurve=hcurve, dhw=dhw, tank=tank, mode=mode, humid=humid, pch=pch, pdhw=pdhw, pcool=pcool, defrost=defrost, tdef=tdef, flimit=flimit, heatdemand=heatdemand,cooldemand=cooldemand, flimiton=flimiton, ltemp=ltemp, presetch=presetch, presetquiet=presetquiet, presetturbo=presetturbo, heatingcurve=heatingcurve, deltatempturbo=deltatempturbo, deltatempquiet = deltatempquiet, deltatempflimit=deltatempflimit, antionoffdeltatime=antionoffdeltatime, delta=delta, antionoff=antionoff, compinfo=compinfo, tempzone=tempzone, flrelay=flrelay)
 
 def get_json_data():
-    heatdemand=GPIO.input(heatdemandpin)
-    cooldemand=GPIO.input(cooldemandpin)
-    flimiton=GPIO.input(freqlimitpin)
-    
-    flrelay=statusdict['flrelay']['value']
-    flimiton=statusdict['flimiton']['value']
+    heatdemand = GPIO.input(heatdemandpin)
+    cooldemand = GPIO.input(cooldemandpin)
+    flimiton = GPIO.input(freqlimitpin)
+    flrelay = flimiton
     intemp=statusdict['intemp']['value']
     outtemp=statusdict['outtemp']['value']
+    tempzone = get_temp_zone(outtemp)
     stemp=statusdict['settemp']['value']
     hcurve=statusdict['hcurve']['value']
     dhw=statusdict['dhw']['value']
@@ -1102,6 +1497,8 @@ def get_json_data():
     pch=statusdict['pch']['value']
     pdhw=statusdict['pdhw']['value']
     pcool=statusdict['pcool']['value']
+    defrost=statusdict.get('defrost', {}).get('value', 'off')
+    tdef=statusdict.get('tdef', {}).get('value', 'N.A.')
     
     presetch = presetautochange
     ltemp = flimittemp
@@ -1139,7 +1536,7 @@ def get_json_data():
     ischanged("deltatempflimit", deltatempflimit)
     ischanged("heatdemand", heatdemand)
     ischanged("cooldemand", cooldemand)
-    ischanged("flrelay", flimiton)
+    ischanged("flrelay", flrelay)
     ischanged("pch", pch)
     ischanged("pcool", pcool)
     ischanged("pdhw", pdhw)
@@ -1152,7 +1549,8 @@ def get_json_data():
     ischanged("intemp", intemp)
     ischanged("mode", mode)
     ischanged("outtemp", outtemp)
-    ischanged("settemp", stemp)  # bo setpoint = stemp
+    ischanged("tempzone", tempzone)
+    ischanged("settemp", stemp)
     ischanged("tank", tank)
     
     return jsonify(locals())
@@ -1180,23 +1578,75 @@ def ischanged(old, new):
         queue_pub(old, new)
 
 def GetDHT22():
+    """Read DHT22 (builtin) values.
+
+    Important: if inside temperature is configured to come from HA (insidetemp != 'builtin'),
+    we still read DHT22 to obtain HUMIDITY (when humidity == 'builtin'), but we do NOT overwrite
+    the inside temperature value nor its meta/status. This prevents source/status flapping.
+    """
+    # NOWE Pause DHT22 sampling during defrost: keep the last good values.
+    defrost_state = str(statusdict.get("defrost", {}).get("value", "off")).strip().lower()
+    threeway_state = str(statusdict.get("threeway", {}).get("value", "")).strip().upper()
+    if defrost_state == "on" or threeway_state == "DEFROST":
+        # Keep last good values without marking them as a sensor failure
+        return statusdict['intemp']['value'], statusdict['humid']['value']
+
     if is_raspberrypi():
-        dhtexec='dht22r'
+        dhtexec = 'dht22r'
     else:
-        dhtexec='dht22n'
+        dhtexec = 'dht22n'
+
+    use_intemp = (str(insidetemp).strip().lower() == 'builtin')
 
     try:
-        result=subprocess.check_output('./bin/'+dhtexec)
-        intemp_raw=result.decode('utf-8').split('#')[1]
-        humid=result.decode('utf-8').split('#')[0]
-        intemp=_filter_intemp(intemp_raw)
-    except:
-        intemp=statusdict['intemp']['value']
-        humid=statusdict['humid']['value']
-    ischanged("intemp", intemp)
+        result = subprocess.check_output('./bin/' + dhtexec)
+        parts = result.decode('utf-8').strip().split('#')
+        humid_raw = parts[0]
+        intemp_raw = parts[1]
+
+        intemp_read = round(float(intemp_raw), 1)
+        humid = round(float(humid_raw), 1)
+
+        # Basic sanity checks (DHT22 glitches can return absurd values)
+        if not (-30.0 <= intemp_read <= 60.0):
+            raise ValueError("DHT22 temp out of range")
+        if not (0.0 <= humid <= 100.0):
+            raise ValueError("DHT22 humidity out of range")
+
+        # Update inside temperature ONLY when configured to use builtin
+        if use_intemp:
+            _update_primary_temp('intemp', intemp_read, 'dht22')
+            intemp = intemp_read
+        else:
+            intemp = statusdict['intemp']['value']
+
+    except Exception:
+        # Keep last values
+        humid = statusdict['humid']['value']
+        intemp = statusdict['intemp']['value']
+
+        # Update inside temperature meta ONLY when configured to use builtin
+        if use_intemp:
+            age = _get_primary_age('intemp')
+            # If we have no last-good value (e.g. after reboot) -> use emergency_intemp from config
+            emerg = _get_emergency_intemp_value()
+            if (age is None or _temp_primary['intemp']['value'] is None) and emerg is not None:
+                intemp = emerg
+                _set_temp_meta('intemp', 'outdated', src='emergency', age_sec=(TEMP_CACHE_MAX_AGE_SEC + 1))
+            else:
+                if age is None:
+                    _set_temp_meta('intemp', 'outdated', src='missing', age_sec=TEMP_CACHE_MAX_AGE_SEC + 1)
+                elif age <= TEMP_CACHE_MAX_AGE_SEC:
+                    _set_temp_meta('intemp', 'forced', src='cache', age_sec=age)
+                else:
+                    _set_temp_meta('intemp', 'outdated', src='cache', age_sec=age)
+
+    # Publish values
+    if use_intemp:
+        ischanged("intemp", intemp)
     ischanged("humid", humid)
- 
-    return intemp,humid
+
+    return intemp, humid
 
 
 def GetInsideTemp(param):
@@ -1216,72 +1666,147 @@ def GetInsideTemp(param):
             logging.error(e)
         try:
             if 'state' in json_str:
-                response = json.loads(json_str)['state']
-                response = float(response)
-                if isinstance(response, float):
-                    logging.info("Insidetemp is float")
-                else:
-                    logging.error("Error: is not float")
-                    return
-                response = _filter_intemp(response)
+                raw = json.loads(json_str).get('state', None)
+
+                # HA can briefly return "NaN" / "unknown" (e.g. during defrost) – keep last good value.
+                f = float(raw)
+                if (not math.isfinite(f)) or math.isnan(f):
+                    raise ValueError("HA returned NaN/inf")
+                # Sanity range (inside air)
+                if not (-40.0 <= f <= 80.0):
+                    raise ValueError("Inside temp out of range")
+                response = round(f, 1)
             else:
                 logging.error("Entity state not found")
-                response = statusdict['intemp']['value']
-        except:
-            response = statusdict['intemp']['value']
+                return statusdict['intemp']['value']
+        except Exception as e:
+            logging.warning(f"GetInsideTemp(ha): keeping last value (invalid state): {e}")
+            age = _get_primary_age('intemp')
+            if age is None:
+                emerg = _get_emergency_intemp_value()
+                if emerg is not None:
+                    _set_temp_meta('intemp', 'outdated', src='emergency', age_sec=(TEMP_CACHE_MAX_AGE_SEC + 1))
+                    ischanged('intemp', emerg)
+                    return emerg
+                _set_temp_meta('intemp', 'outdated', src='missing', age_sec=TEMP_CACHE_MAX_AGE_SEC + 1)
+                return statusdict['intemp']['value']
+            if age <= TEMP_CACHE_MAX_AGE_SEC:
+                _set_temp_meta('intemp', 'forced', src='cache', age_sec=age)
+                return _temp_primary['intemp']['value'] if _temp_primary['intemp']['value'] is not None else statusdict['intemp']['value']
+            _set_temp_meta('intemp', 'outdated', src='cache', age_sec=age)
+            return _temp_primary['intemp']['value'] if _temp_primary['intemp']['value'] is not None else statusdict['intemp']['value']
+
+        _update_primary_temp('intemp', response, 'ha')
         ischanged("intemp", response)
         return response
     else:
         return statusdict['intemp']['value']
 
 def GetOutsideTemp(param):
-    if param == "builtin":
+    def _try_ds18b20():
         try:
             sensor = W1ThermSensor()
             temperature = sensor.get_temperature()
-            if -55 < temperature < 125:
-                ischanged("outtemp", temperature)
-                return temperature
-            else:
-                logging.error("DS18b20: temperature out of range -55 to 125°C")
-                return statusdict['outtemp']['value']
-        except:
-            logging.error("Error: cannot read outside temperature")
-            return statusdict['outtemp']['value']
-    elif param == "ha":
-        # connect to Home Assistant API and get status of outside temperature entity
-        url=config['HOMEASSISTANT']['HAADDR']+":"+config['HOMEASSISTANT']['HAPORT']+"/api/states/"+config['HOMEASSISTANT']['outsidesensor']
-        headers = requests.structures.CaseInsensitiveDict()
-        headers["Accept"] = "application/json"
-        headers["Authorization"] = "Bearer "+config['HOMEASSISTANT']['KEY']
+            if -55.0 <= float(temperature) <= 125.0:
+                return round(float(temperature), 1)
+            logging.error("DS18b20: temperature out of range -55 to 125°C")
+        except Exception:
+            logging.error("Error: cannot read outside temperature (DS18B20)")
+        return None
+
+    def _try_ha():
         try:
-            resp = requests.get(url, headers=headers)
-            json_str = json.dumps(resp.json())
-        except requests.exceptions.RequestException as e:
-            logging.error(e)
+            # connect to Home Assistant API and get status of outside temperature entity
+            url = config['HOMEASSISTANT']['HAADDR']+":"+config['HOMEASSISTANT']['HAPORT']+"/api/states/"+config['HOMEASSISTANT']['outsidesensor']
+            headers = requests.structures.CaseInsensitiveDict()
+            headers["Accept"] = "application/json"
+            headers["Authorization"] = "Bearer "+config['HOMEASSISTANT']['KEY']
+            resp = requests.get(url, headers=headers, timeout=3)
+            j = resp.json()
+            raw = j.get('state', None)
+            f = float(raw)
+            if (not math.isfinite(f)) or math.isnan(f):
+                raise ValueError("HA returned NaN/inf")
+            if not (-55.0 <= f <= 125.0):
+                raise ValueError("Outside temp out of range")
+            return round(f, 1)
+        except Exception as e:
+            logging.warning(f"GetOutsideTemp(ha): invalid/missing state: {e}")
+            return None
+
+    def _try_tao():
+        v = statusdict.get('tao', {}).get('value', None)
         try:
-            if 'state' in json_str:
-                response = json.loads(json_str)['state']
-                response = float(response)
-                if isinstance(response, float):
-                    logging.info("Outsidetemp is float")
-                else:
-                    logging.error("Error: is not float")
-                    return
-            else:
-                logging.error("Entity state not found")
-                response = statusdict['outtemp']['value']
-        except:
-            logging.error("Error: cannot read outside temperature from HA")
-            response = statusdict['outtemp']['value']
-        ischanged("outtemp", response)
-        return response
-    elif param == "tao":
-        temperature = statusdict['tao']['value']
-        ischanged("outtemp", temperature)
-        return temperature
+            f = float(v)
+            if math.isfinite(f) and (not math.isnan(f)) and (-55.0 <= f <= 125.0):
+                return round(f, 1)
+        except Exception:
+            pass
+        return None
+
+    # Determine priority order from configured param
+    order = []
+    if param == 'ha':
+        order = ['ha', 'ds18b']
+    elif param == 'builtin':
+        order = ['ds18b', 'ha']
+    elif param == 'tao':
+        order = ['tao']
     else:
+        # other modes (e.g. openmeteo) keep existing value + meta only
+        order = []
+
+    # 1) Try configured source + secondary (ds18b/ha)
+    for src in order:
+        if src == 'ds18b':
+            t = _try_ds18b20()
+            if t is not None:
+                _update_primary_temp('outtemp', t, 'ds18b')
+                primary_src = 'ha' if param == 'ha' else ('ds18b' if param == 'builtin' else ('tao' if param == 'tao' else None))
+                if primary_src is not None and primary_src != 'ds18b':
+                    _set_temp_meta('outtemp', 'forced', src='ds18b', age_sec=0)
+                ischanged('outtemp', t)
+                return t
+        elif src == 'ha':
+            t = _try_ha()
+            if t is not None:
+                _update_primary_temp('outtemp', t, 'ha')
+                primary_src = 'ha' if param == 'ha' else ('ds18b' if param == 'builtin' else ('tao' if param == 'tao' else None))
+                if primary_src is not None and primary_src != 'ha':
+                    _set_temp_meta('outtemp', 'forced', src='ha', age_sec=0)
+                ischanged('outtemp', t)
+                return t
+        elif src == 'tao':
+            t = _try_tao()
+            if t is not None:
+                # Tao explicitly configured as a primary source
+                _update_primary_temp('outtemp', t, 'tao')
+                ischanged('outtemp', t)
+                return t
+
+    # 2) Fallback to last primary for up to 30 minutes
+    age = _get_primary_age('outtemp')
+    if age is not None and _temp_primary['outtemp']['value'] is not None and age <= TEMP_CACHE_MAX_AGE_SEC:
+        _set_temp_meta('outtemp', 'forced', src='cache', age_sec=age)
+        return _temp_primary['outtemp']['value']
+
+    # 3) After 30 minutes without primary -> use Tao (if available) and mark as stale (blink)
+    tao = _try_tao()
+    if tao is not None:
+        # Store last seen Tao so we don't revert to an older DS/HA value if Tao disappears later
+        _update_primary_temp('outtemp', tao, 'tao')
+        # _update_primary_temp set status=ok; override with outdated because Tao is a fallback here
+        _set_temp_meta('outtemp', 'outdated', src='tao', age_sec=0)
+        ischanged('outtemp', tao)
+        return tao
+
+    # 4) If Tao missing too: keep last known value but mark stale
+    if age is None:
+        _set_temp_meta('outtemp', 'outdated', src='missing', age_sec=TEMP_CACHE_MAX_AGE_SEC + 1)
         return statusdict['outtemp']['value']
+
+    _set_temp_meta('outtemp', 'outdated', src='cache', age_sec=age)
+    return _temp_primary['outtemp']['value'] if _temp_primary['outtemp']['value'] is not None else statusdict['outtemp']['value']
 
 def GetHumidity(param):
     if param == "builtin":
@@ -1300,13 +1825,22 @@ def GetHumidity(param):
             logging.error(e)
         try:
             if 'state' in json_str:
-                response = json.loads(json_str)['state']
+                raw = json.loads(json_str).get('state', None)
+
+                # Keep last good value if HA returns non-numeric ("unknown", "unavailable", "N.A.")
+                f = float(raw)
+                if (not math.isfinite(f)) or math.isnan(f):
+                    raise ValueError("HA returned NaN/inf")
+                if not (0.0 <= f <= 100.0):
+                    raise ValueError("Humidity out of range")
+                response = round(f, 1)
             else:
                 logging.error("GetHumidity: Entity state not found")
-                response = statusdict['humid']['value']
-        except:
-                logging.error("Error: cannot read humidity from HA")
-                response = statusdict['humid']['value']
+                return statusdict['humid']['value']
+        except Exception as e:
+            logging.warning(f"GetHumidity(ha): keeping last value (invalid state): {e}")
+            return statusdict['humid']['value']
+
         ischanged("humid", response)
         return response
     else:
@@ -1362,7 +1896,6 @@ def flimitreset():
         logging.warning("Flimitreset: Brak klucza 'pump' w statusdict!")
         pump = "N.A."
         
-       
 
     # Sprawdzenie warunków i wyłączenie ograniczenia częstotliwości
     if flimiton == "1" and antionoff == "1" and flimit != "manual" and pump == "OFF":
@@ -1384,6 +1917,21 @@ def deltacheck(temps):  # AntiON-OFF, Delta liczona z Zadanej CO i temp. powrotu
 
         mode = str(mode).strip().lower()
         threeway = str(threeway).strip().upper()
+
+        # Temperature zones
+        outtemp_val = statusdict.get('outtemp', {}).get('value', None)
+        zone = get_temp_zone(outtemp_val)
+        if zone == 'frost':
+            # In frost zone we do not run Anti ON-OFF / delta logic at all
+            last_check_time = current_time
+            return
+
+        # NOWE Pause AntiON-OFF / DeltaCheck during defrost (disturbance)
+        _defrost = str(statusdict.get('defrost', {}).get('value', 'off')).strip().lower()
+        if threeway == 'DEFROST' or _defrost == 'on':
+            logging.info('AntiON-OFF: Defrost active - paused')
+            last_check_time = current_time
+            return
 
         if threeway != "CH":
             last_check_time = current_time
@@ -1420,45 +1968,58 @@ def deltacheck(temps):  # AntiON-OFF, Delta liczona z Zadanej CO i temp. powrotu
                     deltatempquiet = float(deltatempquiet)
 
                     # Zmiana trybu pracy pompy
-                    if delta > deltatempturbo:
-                        if mode != "turbo":
-                            logging.info(f"AntiON-OFF: Delta {delta} > {deltatempturbo}, changing mode to Turbo")
-                            new_presetchange("turbo")
-
+                    if zone == 'warm':
+                        # Zone 3: only Quiet (no Turbo/Eco chasing)
+                        if mode != 'quiet':
+                            logging.info('AntiON-OFF (zone warm): forcing mode to Quiet')
+                            new_presetchange('quiet')
                         else:
-                            logging.info(f"AntiON-OFF: No need to change mode (already Turbo).")
-
-                    elif deltatempquiet <= delta <= deltatempturbo:
-                        if mode != "eco":
-                            logging.info(f"AntiON-OFF: Delta {delta} is in range ({deltatempquiet}, {deltatempturbo}), changing mode to Eco")
-                            new_presetchange("eco")
-                            
-                        else:
-                            logging.info(f"AntiON-OFF: Delta is {delta}, no need to change mode (already Eco).")
-
-                    elif delta < deltatempquiet:
-                        if mode != "quiet":
-                            logging.info(f"AntiON-OFF: Delta {delta} is in range ({deltatempflimit}, {deltatempquiet}), changing mode to Quiet")
-                            new_presetchange("quiet")
-                            
-                        else:
-                            logging.info(f"AntiON-OFF: No need to change mode (already Quiet).")
-                  
-
-                    # Sterowanie ograniczeniem częstotliwości tylko w trybie quiet
-                    if flimit != 'manual':
-                        if delta < deltatempflimit:
-                            if flimiton != "1":
-                                logging.info(f"AntiON-OFF: Delta {delta} < {deltatempflimit}, turning ON frequency limit")
-                                flimitchange("1")
+                            logging.info('AntiON-OFF (zone warm): mode already Quiet')
+                    else:
+                        if delta > deltatempturbo:
+                            if mode != 'turbo':
+                                logging.info(f"AntiON-OFF: Delta {delta} > {deltatempturbo}, changing mode to Turbo")
+                                new_presetchange('turbo')
                             else:
-                                logging.info(f"AntiON-OFF: Frequency limit already ON, no action needed.")
-                        elif delta > deltatempflimit:
-                            if flimiton != "0":
-                                logging.info(f"AntiON-OFF: Delta {delta} > {deltatempflimit}, turning OFF frequency limit")
-                                flimitchange("0")
+                                logging.info('AntiON-OFF: No need to change mode (already Turbo).')
+
+                        elif deltatempquiet <= delta <= deltatempturbo:
+                            if mode != 'eco':
+                                logging.info(f"AntiON-OFF: Delta {delta} is in range ({deltatempquiet}, {deltatempturbo}), changing mode to Eco")
+                                new_presetchange('eco')
                             else:
-                                logging.info(f"AntiON-OFF: Frequency limit already OFF, no action needed.")
+                                logging.info(f"AntiON-OFF: Delta is {delta}, no need to change mode (already Eco).")
+
+                        elif delta < deltatempquiet:
+                            if mode != 'quiet':
+                                logging.info(f"AntiON-OFF: Delta {delta} is in range ({deltatempflimit}, {deltatempquiet}), changing mode to Quiet")
+                                new_presetchange('quiet')
+                            else:
+                                logging.info('AntiON-OFF: No need to change mode (already Quiet).')
+
+
+                    # Sterowanie ograniczeniem częstotliwości (FLimit) deltą.
+                    # W strefie "warm" można opcjonalnie wyłączyć udział FLimit (Quiet-only).
+                    warm_mode = str(globals().get('zone_warm_mode', 'quiet_flimit')).strip().lower()
+                    # In warm zone, FLimit participates only when user selected Quiet Flimit (AOO)
+                    flimit_allowed_here = not (zone == 'warm' and warm_mode == 'quiet')
+
+                    if flimit_allowed_here:
+                        if str(flimit).strip().lower() not in ('manual','off'):
+                            if delta < deltatempflimit:
+                                if flimiton != "1":
+                                    logging.info(f"AntiON-OFF: Delta {delta} < {deltatempflimit}, turning ON frequency limit")
+                                    flimitchange("1")
+                                else:
+                                    logging.info(f"AntiON-OFF: Frequency limit already ON, no action needed.")
+                            elif delta > deltatempflimit:
+                                if flimiton != "0":
+                                    logging.info(f"AntiON-OFF: Delta {delta} > {deltatempflimit}, turning OFF frequency limit")
+                                    flimitchange("0")
+                                else:
+                                    logging.info(f"AntiON-OFF: Frequency limit already OFF, no action needed.")
+                    else:
+                        logging.info('AntiON-OFF (zone warm): FLimit disabled by warm-zone mode (Quiet only)')
 
                 else:
                     logging.error("AntiON-OFF: One or more delta values are not valid numbers!")
@@ -1579,29 +2140,30 @@ def GetParametersNEW(reg):
         powerstate = PyHaier.GetState(reg)
         ischanged("dhw", dhw)
 
-        if 'Heat' in powerstate:
-            ischanged("pch", "on")
-        else:
-            ischanged("pch", "off")
+        heat_on = ('Heat' in powerstate)
+        cool_on = ('Cool' in powerstate)
+        tank_on = ('Tank' in powerstate)
 
-        if 'Cool' in powerstate:
-            ischanged("pcool", "on")
-        else:
-            ischanged("pcool", "off")
+        ischanged("pch", "on" if heat_on else "off")
+        ischanged("pcool", "on" if cool_on else "off")
+        ischanged("pdhw", "on" if tank_on else "off")
 
-        # --- Timer dla OFF (5s) ---
+        # Publish consolidated HVAC/DHW modes for HA (and other MQTT clients)
         global last_mode_active_ts
-        if 'Heat' in powerstate or 'Cool' in powerstate:
-            last_mode_active_ts = time.time()
-        else:
-            if time.time() - last_mode_active_ts > 5:
-                if use_mqtt == "1":
+        if use_mqtt == "1":
+            now_ts = time.time()
+            if heat_on:
+                last_mode_active_ts = now_ts
+                client.publish(mqtt_topic + "/mode/state", "heat", qos=1, retain=True)
+            elif cool_on:
+                last_mode_active_ts = now_ts
+                client.publish(mqtt_topic + "/mode/state", "cool", qos=1, retain=True)
+            else:
+                # publish OFF only after a short debounce (prevents 1-frame glitches)
+                if now_ts - last_mode_active_ts > 5:
                     client.publish(mqtt_topic + "/mode/state", "off", qos=1, retain=True)
 
-        if 'Tank' in powerstate:
-            ischanged("pdhw", "on")
-        else:
-            ischanged("pdhw", "off")
+            client.publish(mqtt_topic + "/dhw/mode/state", "heat" if tank_on else "off", qos=1, retain=True)
 
     elif regnum == 16:
         tank = PyHaier.GetDHWCurTemp(reg)
@@ -1614,40 +2176,39 @@ def GetParametersNEW(reg):
         ischanged("thitho", thitho)
         ischanged("pump", pump)
         ischanged("threeway", threeway)
+        update_defrost_state()
 
     elif regnum == 1:
         mode = PyHaier.GetMode(reg)
         ischanged("mode", mode)
 
     elif regnum == 22:
-        tdts = PyHaier.GetTdTs(reg)
-        archerror = PyHaier.GetArchError(reg)
-        compinfo = PyHaier.GetCompInfo(reg)
-        fans = PyHaier.GetFanRpm(reg)
-        pdps = PyHaier.GetPdPs(reg)
-        eevlevel = PyHaier.GetEEVLevel(reg)
-        tsatpd = PyHaier.GetTSatPd(reg)
-        tsatps = PyHaier.GetTSatPs(reg)
-        tao = PyHaier.GetTao(reg)
+        # Snapshot raw registers before any helper mutates the list
+        reg_raw = list(reg) if reg is not None else []
+        reg_work = list(reg_raw)
 
-        def _to_float(v):
-            try:
-                return float(v)
-            except Exception:
-                return None
-                
+        firmware = PyHaier.GetFirmware(reg_raw)
+        tdef = PyHaier.GetTdef(reg_raw)
+
+        tdts = PyHaier.GetTdTs(reg_work)
+        archerror = PyHaier.GetArchError(reg_work)
+        compinfo = PyHaier.GetCompInfo(reg_work)
+        fans = PyHaier.GetFanRpm(reg_work)
+        pdps = PyHaier.GetPdPs(reg_work)
+        eevlevel = PyHaier.GetEEVLevel(reg_work)
+        tsatpd = PyHaier.GetTSatPd(reg_work)
+        tsatps = PyHaier.GetTSatPs(reg_work)
+        tao = PyHaier.GetTao(reg_work)
+        if isinstance(tdef, (int, float)):
+            ischanged("tdef", tdef)
+            
+        # NOWE Superheating / Subcooling
         thitho = statusdict.get("thitho", {}).get("value", [None, None])
-        Ts = _to_float(tdts[1]) if isinstance(tdts,(list,tuple)) and len(tdts)>1 else None
-        Thi = _to_float(thitho[0]) if isinstance(thitho,(list,tuple)) and len(thitho)>1 else None
-        TsatPs_act = _to_float(tsatps[1]) if isinstance(tsatps,(list,tuple)) and len(tsatps)>1 else None
-        TsatPd_act = _to_float(tsatpd[1]) if isinstance(tsatpd,(list,tuple)) and len(tsatpd)>1 else None
-
-        superheat  = f"{abs(Ts - TsatPs_act):.1f}" if (Ts is not None and TsatPs_act is not None) else "N.A."
-        subcooling = f"{abs(TsatPd_act - Thi):.1f}" if (Thi is not None and TsatPd_act is not None) else "N.A."
+        superheat, subcooling = compute_superheat_subcooling(tdts, tsatps, tsatpd, thitho)
 
         ischanged("superheat", superheat)
         ischanged("subcooling", subcooling)
-
+        ischanged("tdef", tdef)
         ischanged("tdts", tdts)
         ischanged("archerror", archerror)
         ischanged("compinfo", compinfo)
@@ -1657,6 +2218,8 @@ def GetParametersNEW(reg):
         ischanged("tsatps", tsatps)
         ischanged("fans", fans)
         ischanged("tao", tao)
+        ischanged("firmware", firmware)
+        update_defrost_state()
 
 
 def GetParameters():
@@ -1682,14 +2245,24 @@ def GetParameters():
     global modechart_eco
     global modechart_turbo
     global threeway_chart
-    if insidetemp == 'builtin' or outsidetemp == 'builtin':
+    
+    update_defrost_state()
+
+    if insidetemp == 'builtin' or humidity == 'builtin':
         threading.Thread(target=GetDHT22, daemon=True).start()
     threading.Thread(target=GetInsideTemp, args=(insidetemp,), daemon=True).start()
     threading.Thread(target=GetOutsideTemp, args=(outsidetemp,), daemon=True).start()
     threading.Thread(target=GetHumidity, args=(humidity,), daemon=True).start()
     threading.Thread(target=hpiapp, daemon=True).start()
     now=datetime.now().strftime("%d %b %H:%M:%S")
-    datechart.append(str(now))
+    # Ograniczamy liczbę punktów na wykresach: dopisujemy maksymalnie raz na CHART_INTERVAL_SEC.
+    global _last_chart_ts
+    _now_ts = time.time()
+    _do_chart = (_now_ts - _last_chart_ts) >= CHART_INTERVAL_SEC
+    if _do_chart:
+        _last_chart_ts = _now_ts
+
+    if _do_chart: datechart.append(str(now))
     tank=statusdict['tank']['value']
     twitwo=statusdict['twitwo']['value']
     thitho=statusdict['thitho']['value']
@@ -1707,15 +2280,55 @@ def GetParameters():
     tsatpd=statusdict['tsatpd']['value']
     tsatps=statusdict['tsatps']['value']
     fans=statusdict['fans']['value']
+
+    # Wykresy: część pomp ma 2 wentylatory. Normalizujemy do dwóch liczb.
+    def _fans_to_two(v):
+        try:
+            if isinstance(v, (list, tuple)):
+                arr = list(v)
+            elif isinstance(v, str):
+                s = v.strip()
+                if s.startswith('[') and s.endswith(']'):
+                    # JSON list
+                    arr = json.loads(s)
+                elif ',' in s:
+                    arr = [x.strip() for x in s.split(',')]
+                elif s == '' or s.upper() == 'N.A.':
+                    arr = []
+                else:
+                    arr = [s]
+            else:
+                arr = []
+
+            def _num(x):
+                try:
+                    if x in (None, '', 'N.A.'): return ''
+                    return float(x)
+                except Exception:
+                    return ''
+
+            f1 = _num(arr[0]) if len(arr) > 0 else ''
+            f2 = _num(arr[1]) if len(arr) > 1 else ''
+            return f1, f2
+        except Exception:
+            return '', ''
+
+    fan1, fan2 = _fans_to_two(fans)
     tao=statusdict['tao']['value']
     dhw=statusdict['dhw']['value']
     intemp=statusdict['intemp']['value']
     outtemp=statusdict['outtemp']['value']
+    tempzone = get_temp_zone(outtemp)
     humid=statusdict['humid']['value']
     hcurve=statusdict['hcurve']['value']
     flimiton_gpio = str(GPIO.input(freqlimitpin))
     ischanged("flimiton", flimiton_gpio)
     flimiton=statusdict['flimiton']['value']
+    # Wykres częstotliwości: ON ma być 10, OFF 0
+    try:
+        flimiton_num = 10 if int(str(flimiton).strip() or '0') > 0 else 0
+    except Exception:
+        flimiton_num = 0
     threeway=statusdict['threeway']['value']
     if mode == "quiet":
         mode_q=1
@@ -1733,35 +2346,98 @@ def GetParameters():
         mode_q=0
         mode_e=0
         mode_t=0
-    tankchart.append(tank)
-    twichart.append(twitwo[0])
-    twochart.append(twitwo[1])
-    thichart.append(thitho[0])
-    thochart.append(thitho[1])
-    modechart_quiet.append(mode_q)
-    modechart_eco.append(mode_e)
-    modechart_turbo.append(mode_t)
-    tdchart.append(tdts[0])
-    tschart.append(tdts[1])
-    factchart.append(compinfo[0])
-    fsetchart.append(compinfo[1])
-    pdsetchart.append(pdps[0])
-    pdactchart.append(pdps[1])
-    pssetchart.append(pdps[2])
-    psactchart.append(pdps[3])
-    eevlevelchart.append(eevlevel)
-    tsatpdsetchart.append(tsatpd[0])
-    tsatpdactchart.append(tsatpd[1])
-    tsatpssetchart.append(tsatps[0])
-    tsatpsactchart.append(tsatps[1])
-    taochart.append(tao)
-    intempchart.append(intemp)
-    outtempchart.append(outtemp)
-    humidchart.append(humid)
-    hcurvechart.append(hcurve)
-    flimitonchart.append(flimiton)
-    threewaychart.append(threeway)
-    socketlocal.emit("chart_update", {'datechart': str(now), 'tankchart': tank, 'twichart': twitwo[0], 'twochart': twitwo[1], 'thichart': thitho[0], 'thochart': thitho[1], 'taochart': tao, 'tdchart': tdts[0], 'tschart': tdts[1], 'pdsetchart': pdps[0], 'pdactchart': pdps[1], 'pssetchart': pdps[2], 'psactchart': pdps[3], 'intempchart': statusdict['intemp']['value'], 'outtempchart': statusdict['outtemp']['value'], 'humidchart': statusdict['humid']['value'], 'hcurvechart': statusdict['hcurve']['value'], 'factchart': compinfo[0], 'fsetchart': compinfo[1], 'flimitonchart': statusdict['flimiton']['value']*2, 'modechart_quiet': mode_q, 'modechart_eco': mode_e, 'modechart_turbo': mode_t, 'threewaychart': threeway })
+    if _do_chart: tankchart.append(tank)
+    if _do_chart: twichart.append(twitwo[0])
+    if _do_chart: twochart.append(twitwo[1])
+    if _do_chart: thichart.append(thitho[0])
+    if _do_chart: thochart.append(thitho[1])
+    if _do_chart: modechart_quiet.append(mode_q)
+    if _do_chart: modechart_eco.append(mode_e)
+    if _do_chart: modechart_turbo.append(mode_t)
+    if _do_chart: tdchart.append(tdts[0])
+    if _do_chart: tschart.append(tdts[1])
+    if _do_chart: factchart.append(compinfo[0])
+    if _do_chart: fsetchart.append(compinfo[1])
+    if _do_chart: pdsetchart.append(pdps[0])
+    if _do_chart: pdactchart.append(pdps[1])
+    if _do_chart: pssetchart.append(pdps[2])
+    if _do_chart: psactchart.append(pdps[3])
+    if _do_chart: eevlevelchart.append(eevlevel)
+    if _do_chart: fan1chart.append(fan1)
+    if _do_chart: fan2chart.append(fan2)
+    if _do_chart: tsatpdsetchart.append(tsatpd[0])
+    if _do_chart: tsatpdactchart.append(tsatpd[1])
+    if _do_chart: tsatpssetchart.append(tsatps[0])
+    if _do_chart: tsatpsactchart.append(tsatps[1])
+    
+    # Superheat/Subcooling do wykresów: bierzemy już policzone wartości z statusdict
+    def _chart_num(v):
+        try:
+            if v in (None, '', 'N.A.'): 
+                return ''
+            return float(v)
+        except Exception:
+            return ''
+    _sh = _chart_num(statusdict.get('superheat', {}).get('value', 'N.A.'))
+    _sc = _chart_num(statusdict.get('subcooling', {}).get('value', 'N.A.'))
+    if _do_chart: superheatchart.append(_sh)
+    if _do_chart: subcoolingchart.append(_sc)
+    
+    # NOWE tdef (defrost temperature) and defrost flag (0/1) for charts
+    try:
+        _tdef_v = statusdict.get('tdef', {}).get('value', '')
+        if _tdef_v in (None, '', 'N.A.'):
+            _tdef_chart = ''
+        else:
+            _tdef_chart = float(_tdef_v)
+    except Exception:
+        _tdef_chart = ''
+    _defrost_flag = 1 if str(statusdict.get('defrost', {}).get('value', 'off')).strip().lower() == 'on' else 0
+    
+    if _do_chart: tdefchart.append(_tdef_chart)
+    if _do_chart: defrostchart.append(_defrost_flag)
+    
+    if _do_chart: taochart.append(tao)
+    if _do_chart: intempchart.append(intemp)
+    if _do_chart: outtempchart.append(outtemp)
+    if _do_chart: humidchart.append(humid)
+    if _do_chart: hcurvechart.append(hcurve)
+    if _do_chart: flimitonchart.append(flimiton_num)
+    if _do_chart: threewaychart.append(threeway)
+    
+    socketlocal.emit("chart_update", {
+        'datechart': str(now),
+        'tankchart': tank,
+        'twichart': twitwo[0],
+        'twochart': twitwo[1],
+        'thichart': thitho[0],
+        'thochart': thitho[1],
+        'taochart': tao,
+        'tdchart': tdts[0],
+        'tschart': tdts[1],
+        'pdsetchart': pdps[0],
+        'pdactchart': pdps[1],
+        'pssetchart': pdps[2],
+        'psactchart': pdps[3],
+        'eevlevelchart': eevlevel,
+        'fan1chart': fan1,
+        'fan2chart': fan2,
+        'intempchart': statusdict['intemp']['value'],
+        'outtempchart': statusdict['outtemp']['value'],
+        'humidchart': statusdict['humid']['value'],
+        'hcurvechart': statusdict['hcurve']['value'],
+        'factchart': compinfo[0],
+        'fsetchart': compinfo[1],
+        'flimitonchart': flimiton_num,
+        'modechart_quiet': mode_q,
+        'modechart_eco': mode_e,
+        'modechart_turbo': mode_t,
+        'threewaychart': threeway,
+        'tdefchart': _tdef_chart,
+        'defrostchart': _defrost_flag,
+        'superheatchart': _sh,
+        'subcoolingchart': _sc
+    })
     deltacheck(twitwo)
     flimitreset()
     scheduler()
@@ -1770,145 +2446,25 @@ def GetParameters():
             logging.info("DHWWL Function ON")
             flimitchange("0")
             new_presetchange("turbo")
-"""    if len(R141) == 16:
-        tank = PyHaier.GetDHWCurTemp(R141)
-        twitwo = PyHaier.GetTwiTwo(R141)
-        thitho = PyHaier.GetThiTho(R141)
-        pump=PyHaier.GetPump(R141)
-        threeway=PyHaier.Get3way(R141)
-        ischanged("tank", tank)
-        tankchart.append(tank)
-        ischanged("twitwo", twitwo)
-        twichart.append(twitwo[0])
-        twochart.append(twitwo[1])
-        ischanged("thitho", thitho)
-        thichart.append(thitho[0])
-        thochart.append(thitho[1])
-        ischanged("pump", pump)
-        ischanged("threeway", threeway)
-        deltacheck(twitwo)
-        flimitreset()
-    if len(R201) == 1:
-        mode=PyHaier.GetMode(R201)
-        ischanged("mode", mode)
-        if mode == "quiet":
-            mode_q=1
-            mode_e=0
-            mode_t=0
-        elif mode == "eco":
-            mode_q=0
-            mode_e=2
-            mode_t=0
-        elif mode == "turbo":
-            mode_q=0
-            mode_e=0
-            mode_t=3
-        else:
-            mode_q=0
-            mode_e=0
-            mode_t=0
-        modechart_quiet.append(mode_q)
-        modechart_eco.append(mode_e)
-        modechart_turbo.append(mode_t)
 
-    if len(R241) == 22:
-        tdts=PyHaier.GetTdTs(R241)
-        archerror=PyHaier.GetArchError(R241)
-        compinfo=PyHaier.GetCompInfo(R241)
-        #0.0002777778
-        kwhnow=float(float(compinfo[2])*float(compinfo[3])/1000*float(kwhnowcorr))
-        if str(statusdict['threeway']['value']) == 'DHW':
-            dhwkwhpd=float(statusdict['dhwkwhpd']['value'])+kwhnow
-            ischanged("dhwkwhpd", dhwkwhpd)
-        elif str(statusdict['threeway']['value']) == "CH":
-            chkwhpd=float(statusdict['chkwhpd']['value'])+kwhnow
-            ischanged("chkwhpd",chkwhpd)
-        fans=PyHaier.GetFanRpm(R241)
-        pdps=PyHaier.GetPdPs(R241)
-        eevlevel=PyHaier.GetEEVLevel(R241)
-        tsatpd=PyHaier.GetTSatPd(R241)
-        tsatps=PyHaier.GetTSatPs(R241)
-        tao=PyHaier.GetTao(R241)
-        ischanged("tdts", tdts)
-        tdchart.append(tdts[0])
-        tschart.append(tdts[1])
-        factchart.append(compinfo[0])
-        fsetchart.append(compinfo[1])
-        ischanged("archerror", archerror)
-        ischanged("compinfo", compinfo)
-        ischanged("pdps", pdps)
-        ischanged("eevlevel",eevlevel)
-        ischanged("tsatpd",tsatpd)
-        ischanged("tsatps",tsatps)
-        pdsetchart.append(pdps[0])
-        pdactchart.append(pdps[1])
-        pssetchart.append(pdps[2])
-        psactchart.append(pdps[3])
-        eevlevelchart.append(eevlevel)
-        tsatpdsetchart.append(tsatpd[0])
-        tsatpdactchart.append(tsatpd[1])
-        tsatpssetchart.append(tsatps[0])
-        tsatpsactchart.append(tsatps[1])
-        ischanged("fans", fans)
-        ischanged("tao", tao)
-        taochart.append(tao)
-    if len(R101) == 6:
-        dhw=PyHaier.GetDHWTemp(R101)
-        ischanged("dhw", dhw)
-        powerstate=PyHaier.GetState(R101)
-        if 'Heat' in powerstate:
-            ischanged("pch", "on")
-        else:
-            ischanged("pch", "off")
-        if 'Cool' in powerstate:
-            ischanged("pcool", "on")
-        else:
-            ischanged("pcool", "off")
-        if not any(substring in powerstate for substring in ["Cool", "Heat"]):
-            if use_mqtt == "1":
-                client.publish(mqtt_topic + "/mode/state", "off")
-        if 'Tank' in powerstate:
-            ischanged("pdhw", "on")
-        else:
-            ischanged("pdhw", "off")
-    ischanged("intemp", GetInsideTemp(insidetemp))
-    ischanged("outtemp", GetOutsideTemp(outsidetemp))
-    ischanged("humid", GetHumidity(humidity))
-    scheduler()
-    intempchart.append(statusdict['intemp']['value'])
-    outtempchart.append(statusdict['outtemp']['value'])
-    humidchart.append(statusdict['humid']['value'])
-    hcurvechart.append(statusdict['hcurve']['value'])
-    threeway=statusdict['threeway']['value']
-    compinfo=statusdict['compinfo']['value']
-    preset=statusdict['mode']['value']
-    flimit=statusdict['flimit']['value']
-    antionoff=statusdict['antionoff']['value']
-    flimiton=GPIO.input(freqlimitpin)
-    ischanged("flimiton", flimiton)
-    flimitonchart.append(statusdict['flimiton']['value']*2)
-    
-    if len(compinfo) > 0:
-        if dhwwl == "1" and compinfo[0] > 0 and threeway == "DHW" and (flimiton == "1" or preset != "turbo"):
-            logging.info("DHWWL Function ON")
-            flimitchange("0")
-            new_presetchange("turbo")
- 
-    socketlocal.emit("chart_update", {'datechart': str(now), 'tankchart': tank, 'twichart': twitwo[0], 'twochart': twitwo[1], 'thichart': thitho[0], 'thochart': thitho[1], 'taochart': tao, 'tdchart': tdts[0], 'tschart': tdts[1], 'pdsetchart': pdps[0], 'pdactchart': pdps[1], 'pssetchart': pdps[2], 'psactchart': pdps[3], 'intempchart': statusdict['intemp']['value'], 'outtempchart': statusdict['outtemp']['value'], 'humidchart': statusdict['humid']['value'], 'hcurvechart': statusdict['hcurve']['value'], 'factchart': compinfo[0], 'fsetchart': compinfo[1], 'flimitonchart': statusdict['flimiton']['value']*2, 'modechart_quiet': mode_q, 'modechart_eco': mode_e, 'modechart_turbo': mode_t })
-"""
-#NOWE wywołanie lgoów 'ischanged' co 30s 
+    # Snapshot pełnego statusu co 30s (do logu), niezależnie od ischanged()
+    log_status_snapshot(30)
 
-def log_all_statusdict_forced(interval_s=30):
-    while True:
-        try:
-            logging.info(f"----- Forced status snapshot (every {interval_s}s) -----")
-            for key, entry in statusdict.items():
-                val = entry.get("value", "N.A.")
-                logging.info(f"ischanged: status {key} has changed. Set new value - {val}")
-            time.sleep(interval_s)
-        except Exception as e:
-            logging.error(f"Error in log_all_statusdict_forced: {e}")
-            time.sleep(interval_s)
+# NOWE Snapshot statusdict co 30s (pełny stan w jednej linii).
+_last_snapshot_ts = 0
+
+def log_status_snapshot(interval_s=30):
+    global _last_snapshot_ts
+    now = time.time()
+    if now - _last_snapshot_ts < interval_s:
+        return
+    _last_snapshot_ts = now
+
+    try:
+        snap = {k: v.get("value", "N.A.") for k, v in statusdict.items()}
+        logging.info("status_snapshot: %s", json.dumps(snap, ensure_ascii=False, separators=(",", ":"), default=str))
+    except Exception as e:
+        logging.error(f"Error in log_status_snapshot: {e}")
 
 def gen_charts(hours=12):
     fromwhen=8640-(hours*60)
@@ -1936,27 +2492,21 @@ def gen_charts(hours=12):
     chartmode_eco = list(islice(modechart_eco, fromwhen, None))
     chartmode_turbo = list(islice(modechart_turbo, fromwhen, None))
     chartthreeway = list(islice(threewaychart, fromwhen, None))
-    # Obliczanie wartości Przegrzania i Przechłodzenia
-    chartsuperheat = []
-    chartsubcooling = []
-    for i in range(len(chartts)):
-        # Sprawdzanie, czy wartości są puste, jeśli tak, przypisujemy domyślną wartość (np. 0)
-        chartts_value = chartts[i] if chartts[i] != '' else '0'
-        tsatpsactchart_value = tsatpsactchart[i] if tsatpsactchart[i] != '' else '0'
-        tsatpdactchart_value = tsatpdactchart[i] if tsatpdactchart[i] != '' else '0'
-        chartthi_value = chartthi[i] if chartthi[i] != '' else '0'
+    
+    # NOWE Wykres Tdef i Defrost
+    charttdef = list(islice(tdefchart, fromwhen, None))
+    chartdefrost = list(islice(defrostchart, fromwhen, None))
 
-    # Obliczenia superheat i subcooling z wartościami bezwzględnymi
-    # Przegrzanie = Ts − TSatPs
-    # Dochłodzenie = TSatPd - Thi
-        superheat = abs(float(chartts_value) - float(tsatpsactchart_value))
-        subcooling = abs(float(tsatpdactchart_value) - float(chartthi_value))
-
-        chartsuperheat.append(superheat)
-        chartsubcooling.append(subcooling)
-
-        return chartdate, charttank, charttwi, charttwo, chartthi, charttho, charttao, charttd, chartts, chartpdset, chartpdact, chartpsset, chartpsact, chartintemp, chartouttemp, charthumid, charthcurve, chartfact, chartfset, chartflimiton, chartmode_quiet, chartmode_eco, chartmode_turbo, chartthreeway, chartsuperheat, chartsubcooling
-
+    # NOWE Przegrzanie / dochłodzenie jako gotowe serie (liczone przy dopisywaniu próbek do wykresów)
+    chartsuperheat = list(islice(superheatchart, fromwhen, None))
+    chartsubcooling = list(islice(subcoolingchart, fromwhen, None))
+    
+    #NOWE Wykres wentylatory i eev
+    charteevlevel=list(islice(eevlevelchart, fromwhen, None))
+    chartfan1=list(islice(fan1chart, fromwhen, None))
+    chartfan2=list(islice(fan2chart, fromwhen, None))
+    
+    return chartdate, charttank, charttwi, charttwo, chartthi, charttho, charttao, charttd, chartts, chartpdset, chartpdact, chartpsset, chartpsact, charteevlevel, chartfan1, chartfan2, chartintemp, chartouttemp, charthumid, charthcurve, chartfact, chartfset, chartflimiton, chartmode_quiet, chartmode_eco, chartmode_turbo, chartthreeway, chartsuperheat, chartsubcooling, charttdef, chartdefrost
 
 def create_user(**data):
     """Creates user with encrypted password"""
@@ -1991,7 +2541,7 @@ def home():
     else:
         theme=statusdict['theme']['value']
         global outsidetemp
-        return render_template('index.html', theme=theme, version=version, needrestart=needrestart, flimit=flimit, outsidetemp=outsidetemp, antionoff=antionoff, presetquiet=presetquiet, presetturbo=presetturbo, presetautochange=presetautochange, flimittemp=flimittemp)
+        return render_template('index.html', theme=theme, version=version, needrestart=needrestart, flimit=flimit, outsidetemp=outsidetemp, antionoff=antionoff, presetquiet=presetquiet, presetturbo=presetturbo, presetautochange=presetautochange, flimittemp=flimittemp, dhwuse=dhwuse)
 
 @app.route('/curvecalc')
 @login_required
@@ -2126,10 +2676,25 @@ def getdata_route():
     output = getdata()
     return output
 
+
+@app.route('/api/system_time', methods=['GET'])
+@login_required(basic=True)
+def system_time_route():
+    """Return current server (DietPi) date & time."""
+    now = datetime.now()
+    try:
+        iso = now.isoformat(timespec='seconds')
+    except TypeError:
+        iso = now.isoformat()
+    return jsonify(
+        iso=iso,
+        display=now.strftime('%Y-%m-%d %H:%M:%S')
+    )
+
 @app.route('/getparams', methods=['GET'])
 @login_required(basic=True)
 def getparams_route():
-    twitwo, thitho, tdts, archerror, compinfo, fans, pdps, eevlevel, tsatpd, tsatps, tao, pump, threeway, chkwhpd, dhwkwhpd, superheat, subcooling = getparams()
+    twitwo, thitho, tdts, archerror, compinfo, fans, pdps, eevlevel, tsatpd, tsatps, tao, pump, threeway, chkwhpd, dhwkwhpd, superheat, subcooling, firmware = getparams()
     return jsonify(
         twitwo=twitwo,
         thitho=thitho,
@@ -2148,6 +2713,7 @@ def getparams_route():
         dhwkwhpd=dhwkwhpd,
         superheat=superheat,
         subcooling=subcooling,
+        firmware=firmware
     )
 
 @socketlocal.on('client')
@@ -2162,7 +2728,7 @@ def handle_client_message(data):
 #        emit('return', {'info': 'ok', 'status': 'success'})
         emit("return", {'statechange': data['mode'], 'status': information })
     elif 'charts' in data:
-        variables=['chartdate', 'charttank', 'charttwi', 'charttwo', 'chartthi', 'charttho', 'charttao', 'charttd', 'chartts', 'chartpdset', 'chartpdact', 'chartpsset', 'chartpsact', 'chartintemp', 'chartouttemp', 'charthumid', 'charthcurve', 'chartfact', 'chartfset', 'chartflimiton', 'chartmode_quiet', 'chartmode_eco', 'chartmode_turbo','chartthreeway', 'chartsuperheat', 'chartsubcooling']
+        variables=['chartdate', 'charttank', 'charttwi', 'charttwo', 'chartthi', 'charttho', 'charttao', 'charttd', 'chartts', 'chartpdset', 'chartpdact', 'chartpsset', 'chartpsact', 'charteevlevel', 'chartfan1', 'chartfan2', 'chartintemp', 'chartouttemp', 'charthumid', 'charthcurve', 'chartfact', 'chartfset', 'chartflimiton', 'chartmode_quiet', 'chartmode_eco', 'chartmode_turbo','chartthreeway', 'chartsuperheat', 'chartsubcooling', 'charttdef', 'chartdefrost']
         values=gen_charts(int(data['charts']))
         valname=dict(zip(variables, values))
         emit('charts', valname)
@@ -2231,7 +2797,7 @@ def command(data):
             sio_remote.emit('return_from_device', {'info': 'Błąd zapisu', 'status': 'danger'})
 
     if 'get_charts' in data:
-        variables=['chartdate', 'charttank', 'charttwi', 'charttwo', 'chartthi', 'charttho', 'charttao', 'charttd', 'chartts', 'chartpdset', 'chartpdact', 'chartpsset', 'chartpsact', 'chartintemp', 'chartouttemp', 'charthumid', 'charthcurve', 'chartfact', 'chartfset', 'chartflimiton', 'chartmode_quiet', 'chartmode_eco', 'chartmode_turbo', 'chartsuperheat', 'chartsubcooling']
+        variables=['chartdate', 'charttank', 'charttwi', 'charttwo', 'chartthi', 'charttho', 'charttao', 'charttd', 'chartts', 'chartpdset', 'chartpdact', 'chartpsset', 'chartpsact', 'charteevlevel', 'chartfan1', 'chartfan2', 'chartintemp', 'chartouttemp', 'charthumid', 'charthcurve', 'chartfact', 'chartfset', 'chartflimiton', 'chartmode_quiet', 'chartmode_eco', 'chartmode_turbo','chartthreeway', 'chartsuperheat', 'chartsubcooling', 'charttdef', 'chartdefrost']
         values=gen_charts(int(data['get_charts']))
         valname=dict(zip(variables, values))
         charts={"charts": valname}
@@ -2242,7 +2808,7 @@ def command(data):
         heatingcurve = config['SETTINGS']['heatingcurve']
         antionoff = config['SETTINGS']['antionoff']
         hpiconn = statusdict['hpiconn']['value']
-        settings={"settings": {"SETTINGS$insidetemp": insidetemp,"SETTINGS$outsidetemp": outsidetemp,"SETTINGS$humidity": humidity,"SETTINGS$antionoff": antionoff,"SETTINGS$antionoffdeltatime": antionoffdeltatime,"SETTINGS$deltatempturbo": deltatempturbo,"SETTINGS$deltatempquiet": deltatempquiet,"SETTINGS$deltatempflimit": deltatempflimit,"SETTINGS$dhwwl": dhwwl,"SETTINGS$chscheduler": chscheduler, "SETTINGS$dhwscheduler": dhwscheduler,"SETTINGS$flimit": flimit,"SETTINGS$flimittemp": flimittemp,"SETTINGS$presetautochange": presetautochange,"SETTINGS$presetquiet": presetquiet,"SETTINGS$presetturbo": presetturbo,"SETTINGS$heatingcurve": heatingcurve,"MAIN$heizfreq": timeout,"SETTINGS$hcslope": slope,"SETTINGS$hcpshift": pshift,"SETTINGS$hcamp": hcamp,"SETTINGS$hcman": hcman,"HOMEASSISTANT$HAADDR": haaddr,"HOMEASSISTANT$HAPORT": haport,"HOMEASSISTANT$KEY": hakey,"HOMEASSISTANT$ha_mqtt_discovery": ha_mqtt_discovery,"HOMEASSISTANT$insidesensor": insidesensor,"HOMEASSISTANT$outsidesensor": outsidesensor,"HOMEASSISTANT$humiditysensor": humiditysensor,"MQTT$mqtt": use_mqtt,"MQTT$address": mqtt_broker_addr,"MQTT$port": mqtt_broker_port,"MQTT$mqtt_ssl": mqtt_ssl,"MQTT$main_topic": mqtt_topic,"MQTT$username": mqtt_username,"MQTT$password": mqtt_password,"MAIN$bindaddress": bindaddr,"MAIN$bindport": bindport,"MAIN$modbusdev": modbusdev,"GPIO$modbus": modbuspin,"GPIO$freqlimit": freqlimitpin,"GPIO$heatdemand": heatdemandpin,"GPIO$cooldemand": cooldemandpin, "HPIAPP$hpikey":hpikey,"HPIAPP$hpiatstart":hpiatstart ,"hpiconn":hpiconn}}
+        settings={"settings": {"SETTINGS$insidetemp": insidetemp,"SETTINGS$emergency_intemp": emergency_intemp,"SETTINGS$outsidetemp": outsidetemp,"SETTINGS$humidity": humidity,"SETTINGS$antionoff": antionoff,"SETTINGS$antionoffdeltatime": antionoffdeltatime,"SETTINGS$deltatempturbo": deltatempturbo,"SETTINGS$deltatempquiet": deltatempquiet,"SETTINGS$deltatempflimit": deltatempflimit,"SETTINGS$zone_frost_enable": zone_frost_enable,"SETTINGS$zone_frost_temp": zone_frost_temp,"SETTINGS$zone_frost_mode": zone_frost_mode,"SETTINGS$zone_warm_enable": zone_warm_enable,"SETTINGS$zone_warm_temp": zone_warm_temp,"SETTINGS$zone_warm_mode": zone_warm_mode,"SETTINGS$dhwwl": dhwwl,"SETTINGS$dhwuse": dhwuse,"SETTINGS$chscheduler": chscheduler, "SETTINGS$dhwscheduler": dhwscheduler,"SETTINGS$flimit": flimit,"SETTINGS$flimittemp": flimittemp,"SETTINGS$presetautochange": presetautochange,"SETTINGS$presetquiet": presetquiet,"SETTINGS$presetturbo": presetturbo,"SETTINGS$heatingcurve": heatingcurve,"MAIN$heizfreq": timeout,"SETTINGS$hcslope": slope,"SETTINGS$hcpshift": pshift,"SETTINGS$hcamp": hcamp,"SETTINGS$hcman": hcman,"HOMEASSISTANT$HAADDR": haaddr,"HOMEASSISTANT$HAPORT": haport,"HOMEASSISTANT$KEY": hakey,"HOMEASSISTANT$ha_mqtt_discovery": ha_mqtt_discovery,"HOMEASSISTANT$insidesensor": insidesensor,"HOMEASSISTANT$outsidesensor": outsidesensor,"HOMEASSISTANT$humiditysensor": humiditysensor,"MQTT$mqtt": use_mqtt,"MQTT$address": mqtt_broker_addr,"MQTT$port": mqtt_broker_port,"MQTT$mqtt_ssl": mqtt_ssl,"MQTT$main_topic": mqtt_topic,"MQTT$username": mqtt_username,"MQTT$password": mqtt_password,"MAIN$bindaddress": bindaddr,"MAIN$bindport": bindport,"MAIN$modbusdev": modbusdev,"GPIO$modbus": modbuspin,"GPIO$freqlimit": freqlimitpin,"GPIO$heatdemand": heatdemandpin,"GPIO$cooldemand": cooldemandpin, "HPIAPP$hpikey":hpikey,"HPIAPP$hpiatstart":hpiatstart ,"hpiconn":hpiconn}}
         sio_remote.emit("data_from_device", settings)
     #if 'restarted' in data:
     #    grestarted = 0
@@ -2263,14 +2829,15 @@ def command(data):
         sio_remote.emit('return_from_device', {'curvecalc': curve })
 
     if 'get_data' in data:
-        heatdemand=GPIO.input(heatdemandpin)
-        cooldemand=GPIO.input(cooldemandpin)
-        flimiton=GPIO.input(freqlimitpin)
+        heatdemand = GPIO.input(heatdemandpin)
+        cooldemand = GPIO.input(cooldemandpin)
+        flimiton_gpio = GPIO.input(freqlimitpin)
+        flrelay = flimiton_gpio
         
         restarted = grestarted
-        flimiton=statusdict['flimiton']['value']
         intemp=statusdict['intemp']['value']
         outtemp=statusdict['outtemp']['value']
+        tempzone = get_temp_zone(outtemp)
         setpoint=statusdict['settemp']['value']
         hcurve=statusdict['hcurve']['value']
         dhw=statusdict['dhw']['value']
@@ -2314,10 +2881,11 @@ def command(data):
         dtturbo=deltatempturbo
         aoodt=antionoffdeltatime
         
-        # --- AKTUALIZACJA statusdict ---
+        # --- statusdict ---
         ischanged("heatdemand", heatdemand)
         ischanged("cooldemand", cooldemand)
-        ischanged("flrelay", flimiton)
+        ischanged("flimiton", flimiton_gpio)
+        ischanged("flrelay", flrelay)
         ischanged("pch", pch)
         ischanged("pcool", pcool)
         ischanged("pdhw", pdhw)
@@ -2343,6 +2911,11 @@ def command(data):
         ischanged("thitho", thitho)
         ischanged("pump", pump)
         ischanged("threeway", threeway)
+        
+        # NOWE - Tdef i Defrost (żeby weszły do locals() i poszły przez sio_remote.emit)
+        update_defrost_state()
+        defrost = statusdict.get("defrost", {}).get("value", "off")
+        tdef = statusdict.get("tdef", {}).get("value", "N.A.")
 
         # liczniki
         ischanged("chkwhpd", chkwhpd)
@@ -2359,7 +2932,7 @@ def command(data):
 def handle_connect():
     referer = request.headers.get("Referer")
     if 'charts' in referer:
-        variables=['chartdate', 'charttank', 'charttwi', 'charttwo', 'chartthi', 'charttho', 'charttao', 'charttd', 'chartts', 'chartpdset', 'chartpdact', 'chartpsset', 'chartpsact', 'chartintemp', 'chartouttemp', 'charthumid', 'charthcurve', 'chartfact', 'chartfset', 'chartflimiton', 'chartmode_quiet', 'chartmode_eco', 'chartmode_turbo','chartthreeway', 'chartsuperheat', 'chartsubcooling']
+        variables=['chartdate', 'charttank', 'charttwi', 'charttwo', 'chartthi', 'charttho', 'charttao', 'charttd', 'chartts', 'chartpdset', 'chartpdact', 'chartpsset', 'chartpsact', 'charteevlevel', 'chartfan1', 'chartfan2', 'chartintemp', 'chartouttemp', 'charthumid', 'charthcurve', 'chartfact', 'chartfset', 'chartflimiton', 'chartmode_quiet', 'chartmode_eco', 'chartmode_turbo','chartthreeway', 'chartsuperheat', 'chartsubcooling', 'charttdef', 'chartdefrost']
         values=gen_charts()
         valname=dict(zip(variables, values))
         emit('charts', valname)
@@ -2375,7 +2948,7 @@ def handle_connect():
         heatingcurve = config['SETTINGS']['heatingcurve']
         antionoff = config['SETTINGS']['antionoff']
         hpiconn = statusdict['hpiconn']['value']
-        settings={"SETTINGS$insidetemp": insidetemp,"SETTINGS$outsidetemp": outsidetemp,"SETTINGS$humidity": humidity,"SETTINGS$antionoff": antionoff,"SETTINGS$antionoffdeltatime": antionoffdeltatime,"SETTINGS$deltatempturbo": deltatempturbo,"SETTINGS$deltatempquiet": deltatempquiet,"SETTINGS$deltatempflimit": deltatempflimit,"SETTINGS$dhwwl": dhwwl,"SETTINGS$chscheduler": chscheduler, "SETTINGS$dhwscheduler": dhwscheduler,"SETTINGS$flimit": flimit,"SETTINGS$flimittemp": flimittemp,"SETTINGS$presetautochange": presetautochange,"SETTINGS$presetquiet": presetquiet,"SETTINGS$presetturbo": presetturbo,"SETTINGS$heatingcurve": heatingcurve,"MAIN$heizfreq": timeout,"SETTINGS$hcslope": slope,"SETTINGS$hcpshift": pshift,"SETTINGS$hcamp": hcamp,"SETTINGS$hcman": hcman,"HOMEASSISTANT$HAADDR": haaddr,"HOMEASSISTANT$HAPORT": haport,"HOMEASSISTANT$KEY": hakey,"HOMEASSISTANT$ha_mqtt_discovery": ha_mqtt_discovery,"HOMEASSISTANT$insidesensor": insidesensor,"HOMEASSISTANT$outsidesensor": outsidesensor,"HOMEASSISTANT$humiditysensor": humiditysensor,"MQTT$mqtt": use_mqtt,"MQTT$address": mqtt_broker_addr,"MQTT$port": mqtt_broker_port,"MQTT$mqtt_ssl": mqtt_ssl,"MQTT$main_topic": mqtt_topic,"MQTT$username": mqtt_username,"MQTT$password": mqtt_password,"MAIN$bindaddress": bindaddr,"MAIN$bindport": bindport,"MAIN$modbusdev": modbusdev,"GPIO$modbus": modbuspin,"GPIO$freqlimit": freqlimitpin,"GPIO$heatdemand": heatdemandpin,"GPIO$cooldemand": cooldemandpin, "HPIAPP$hpikey":hpikey,"HPIAPP$hpiatstart":hpiatstart ,"hpiconn":hpiconn}
+        settings={"SETTINGS$insidetemp": insidetemp,"SETTINGS$emergency_intemp": emergency_intemp,"SETTINGS$outsidetemp": outsidetemp,"SETTINGS$humidity": humidity,"SETTINGS$antionoff": antionoff,"SETTINGS$antionoffdeltatime": antionoffdeltatime,"SETTINGS$deltatempturbo": deltatempturbo,"SETTINGS$deltatempquiet": deltatempquiet,"SETTINGS$deltatempflimit": deltatempflimit,"SETTINGS$zone_frost_enable": zone_frost_enable,"SETTINGS$zone_frost_temp": zone_frost_temp,"SETTINGS$zone_frost_mode": zone_frost_mode,"SETTINGS$zone_warm_enable": zone_warm_enable,"SETTINGS$zone_warm_temp": zone_warm_temp,"SETTINGS$zone_warm_mode": zone_warm_mode,"SETTINGS$dhwwl": dhwwl,"SETTINGS$dhwuse": dhwuse,"SETTINGS$chscheduler": chscheduler, "SETTINGS$dhwscheduler": dhwscheduler,"SETTINGS$flimit": flimit,"SETTINGS$flimittemp": flimittemp,"SETTINGS$presetautochange": presetautochange,"SETTINGS$presetquiet": presetquiet,"SETTINGS$presetturbo": presetturbo,"SETTINGS$heatingcurve": heatingcurve,"MAIN$heizfreq": timeout,"SETTINGS$hcslope": slope,"SETTINGS$hcpshift": pshift,"SETTINGS$hcamp": hcamp,"SETTINGS$hcman": hcman,"HOMEASSISTANT$HAADDR": haaddr,"HOMEASSISTANT$HAPORT": haport,"HOMEASSISTANT$KEY": hakey,"HOMEASSISTANT$ha_mqtt_discovery": ha_mqtt_discovery,"HOMEASSISTANT$insidesensor": insidesensor,"HOMEASSISTANT$outsidesensor": outsidesensor,"HOMEASSISTANT$humiditysensor": humiditysensor,"MQTT$mqtt": use_mqtt,"MQTT$address": mqtt_broker_addr,"MQTT$port": mqtt_broker_port,"MQTT$mqtt_ssl": mqtt_ssl,"MQTT$main_topic": mqtt_topic,"MQTT$username": mqtt_username,"MQTT$password": mqtt_password,"MAIN$bindaddress": bindaddr,"MAIN$bindport": bindport,"MAIN$modbusdev": modbusdev,"GPIO$modbus": modbuspin,"GPIO$freqlimit": freqlimitpin,"GPIO$heatdemand": heatdemandpin,"GPIO$cooldemand": cooldemandpin, "HPIAPP$hpikey":hpikey,"HPIAPP$hpiatstart":hpiatstart ,"hpiconn":hpiconn}
         emit('settings', settings)
     else:
         restarted = grestarted
@@ -2383,6 +2956,24 @@ def handle_connect():
         flimiton=statusdict['flimiton']['value']
         intemp=statusdict['intemp']['value']
         outtemp=statusdict['outtemp']['value']
+        # Temperature meta (status / source / age) for tooltips on dashboard
+        intemp_status = statusdict.get('intemp_status', {}).get('value', 'ok')
+        outtemp_status = statusdict.get('outtemp_status', {}).get('value', 'ok')
+
+        # If src is still N.A. right after reboot, fall back to configured source mode
+        _isrc = statusdict.get('intempsrc', {}).get('value', 'N.A.')
+        _osrc = statusdict.get('outtempsrc', {}).get('value', 'N.A.')
+        if _isrc in ('N.A.', 'N.A', '', None):
+            _isrc = insidetemp
+        if _osrc in ('N.A.', 'N.A', '', None):
+            _osrc = outsidetemp
+        intempsrc = _isrc
+        outtempsrc = _osrc
+
+        # Minutes since last update (used in tooltip)
+        intemptime = statusdict.get('intemptime', {}).get('value', '0')
+        outtemptime = statusdict.get('outtemptime', {}).get('value', '0')
+        tempzone = get_temp_zone(outtemp)
         setpoint=statusdict['settemp']['value']
         hcurve=statusdict['hcurve']['value']
         dhw=statusdict['dhw']['value']
@@ -2433,10 +3024,22 @@ def handle_connect():
 
 # Function to run the background function using a scheduler
 def run_background_function():
-    job = every(30).seconds.do(GetParameters)
-    job2 = every(int(timeout)).minutes.do(curvecalc)
+    def _safe_job(fn, name):
+        def _wrapped():
+            try:
+                return fn()
+            except Exception:
+                logging.exception(f"Scheduled job failed: {name}")
+                return None
+        return _wrapped
+
+    every(30).seconds.do(_safe_job(GetParameters, "GetParameters"))
+    every(int(timeout)).minutes.do(_safe_job(curvecalc, "curvecalc"))
     while True:
-        run_pending()
+        try:
+            run_pending()
+        except Exception:
+            logging.exception("Scheduler loop error (run_pending) - continuing")
         time.sleep(1)
         if event.is_set():
             break
@@ -2534,6 +3137,31 @@ def configure_ha_mqtt_discovery():
         
         client.publish(ha_mqtt_discovery_prefix + f"/select/HaierPi/{unique_id}/config", msg, qos=1)
         
+    
+
+    def configure_binary_sensor(name, status_topic, unique_id, device_class=None, template=None, payload_on="on", payload_off="off"):
+        jsonMsg = {
+            "name": name,
+            "stat_t": status_topic,
+            "uniq_id": unique_id,
+            "payload_on": payload_on,
+            "payload_off": payload_off,
+            "exp_aft": "0",
+            "dev": {
+                "name": "HaierPi",
+                "ids": "HaierPi",
+                "cu": f"http://{ip_address}:{bindport}",
+                "mf": "ktostam",
+                "mdl": "HaierPi",
+                "sw": version
+            }
+        }
+        if device_class is not None:
+            jsonMsg["dev_cla"] = device_class
+        if template is not None:
+            jsonMsg["value_template"] = template
+
+        client.publish(ha_mqtt_discovery_prefix + f"/binary_sensor/HaierPi/{unique_id}/config", json.dumps(jsonMsg), qos=1)
     logging.info("Configuring HA discovery")
 
     configure_number("Set temp", mqtt_topic + "/temperature/set", mqtt_topic + "/temperature/state","HaierPi_SetTemp","°C", 0.0, 50.0, "temperature")
@@ -2552,6 +3180,7 @@ def configure_ha_mqtt_discovery():
     configure_sensor("DHW Mode",mqtt_topic + "/dhw/mode/state","HaierPi_DHWMode", None, None, None, None)
     configure_select("DHW Mode", mqtt_topic + "/dhw/mode/set", mqtt_topic + "/dhw/mode/state", "HaierPi_DHWMode", ["off", "heat"])
     configure_sensor("Tao",mqtt_topic + "/details/tao/state","HaierPi_Tao","°C", "temperature","measurement", None)
+    configure_sensor("Tdef",mqtt_topic + "/details/tdef/state","HaierPi_Tdef","°C", "temperature","measurement", None)
     configure_sensor("Twi",mqtt_topic + "/details/twitwo/state","HaierPi_Twi","°C", "temperature","measurement", "{{ value_json[0] | float}}")
     configure_sensor("Two",mqtt_topic + "/details/twitwo/state","HaierPi_Two","°C", "temperature","measurement", "{{ value_json[1] | float}}")
     configure_sensor("Thi",mqtt_topic + "/details/thitho/state","HaierPi_Thi","°C", "temperature","measurement", "{{ value_json[0] | float}}")
@@ -2568,15 +3197,13 @@ def configure_ha_mqtt_discovery():
     configure_sensor("TSatPsact",mqtt_topic + "/details/tsatps/state","HaierPi_TSatPs_act","°C", "temperature","measurement", "{{ value_json[1] | float}}")
     configure_sensor("Heatdemand", mqtt_topic + "/details/heatdemand/state", "HaierPi_HeatDemand", None, None, "measurement", "{{ value_json | float }}")
     configure_sensor("Cooldemand", mqtt_topic + "/details/cooldemand/state","HaierPi_CoolDemand", None, None, None, "{{ value | float }}")
-    configure_sensor("Flrelay", mqtt_topic + "/details/flrelay/state", "HaierPi_FLRelay", None, None, "measurement", "{{ value_json | float }}")
-    configure_sensor("PCool", mqtt_topic + "/details/pcool/state", "HaierPi_PCool", None, None, "measurement", "{{ value_json | float }}")
-    configure_sensor("PDHW", mqtt_topic + "/details/pdhw/state", "HaierPi_PDHW", None, None, "measurement", "{{ value_json | float }}")
-    configure_sensor("PCH", mqtt_topic + "/details/pch/state", "HaierPi_PCH", None, None, "measurement", "{{ value_json | float }}")
+    configure_sensor("Superheat", mqtt_topic + "/details/superheat/state","HaierPi_Superheat","°C", "temperature","measurement", None)
+    configure_sensor("Subcooling", mqtt_topic + "/details/subcooling/state","HaierPi_Subcooling","°C", "temperature","measurement", None)
+    configure_sensor("FLrelay", mqtt_topic + "/details/flrelay/state", "HaierPi_FLRelay", None, None, None, "{{ value | int }}")
     configure_sensor("Anty On-OFF Delta", mqtt_topic + "/details/delta/state", "HaierPi_Delta", "°C", "temperature", "measurement", "{{ value_json | float }}")
     configure_sensor("Delta Temp FLimit", mqtt_topic + "/details/deltatempflimit/state", "HaierPi_DeltaTempFLimit", "°C", "temperature", "measurement", "{{ value_json | float }}")
     configure_sensor("Delta Temp Quiet", mqtt_topic + "/details/deltatempquiet/state", "HaierPi_DeltaTempQuiet", "°C", "temperature", "measurement", "{{ value_json | float }}")
     configure_sensor("Delta Temp Turbo", mqtt_topic + "/details/deltatempturbo/state", "HaierPi_DeltaTempTurbo", "°C", "temperature", "measurement", "{{ value_json | float }}")
-    configure_sensor("Delta Temp Eco", mqtt_topic + "/details/deltatempeco/state", "HaierPi_DeltaTempEco", "°C", "temperature", "measurement", "{{ value_json | float }}")
     configure_sensor("Anti On-Off Delta Time", mqtt_topic + "/details/antionoffdeltatime/state", "HaierPi_AntiOnOffDeltaTime", "min", "duration", "measurement", "{{ value_json | float }}")
     configure_sensor("Compressor fact",mqtt_topic + "/details/compinfo/state","HaierPi_Compfact","Hz", "frequency","measurement", "{{ value_json[0] | float}}")
     configure_sensor("Compressor fset",mqtt_topic + "/details/compinfo/state","HaierPi_Compfset","Hz", "frequency","measurement", "{{ value_json[1] | float}}")
@@ -2588,7 +3215,11 @@ def configure_ha_mqtt_discovery():
     configure_sensor("Daily CH energy usage", mqtt_topic +"/details/chkwhpd","HaierPi_CH_daily_kWh", "kWh", "energy", "measurement", None)
     configure_sensor("Daily DHW energy usage", mqtt_topic +"/details/dhwkwhpd","HaierPi_DHW_daily_kWh", "kWh", "energy", "measurement", None)
     configure_sensor("EEV level",mqtt_topic + "/details/eevlevel/state","HaierPi_EEVLevel", None, None, "measurement","{{ value | float }}")
-    configure_sensor("FLimitOn",mqtt_topic + "/details/flimiton/state","HaierPi_FLimit", None, None, None, "{{ value | float }}")
+    configure_binary_sensor("PCH", mqtt_topic + "/details/pch/state", "HaierPi_PCH")
+    configure_binary_sensor("PCool", mqtt_topic + "/details/pcool/state", "HaierPi_PCool")
+    configure_binary_sensor("PDHW", mqtt_topic + "/details/pdhw/state", "HaierPi_PDHW")
+    configure_binary_sensor("FLimitOn", mqtt_topic + "/details/flimiton/state", "HaierPi_FLimitOn", payload_on="1", payload_off="0")
+    configure_binary_sensor("Defrost", mqtt_topic + "/details/defrost/state", "HaierPi_Defrost")
 
 def threads_check():
     global dead
@@ -2638,13 +3269,9 @@ if __name__ == '__main__':
     logging.warning(f"MQTT: {'enabled' if use_mqtt == '1' else 'disabled'}")
     logging.warning(f"Home Assistant MQTT Discovery: {'enabled' if ha_mqtt_discovery == '1' and use_mqtt == '1' else 'disabled'}")
     signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
     bg_thread = threading.Thread(target=run_background_function, daemon=True)
     bg_thread.start()
-    #NOWE - dodanie wszystkich 'ischanged' co 30s
-    log_statusdict_thread = threading.Thread(target=log_all_statusdict_forced, args=(30,), daemon=True)
-    log_statusdict_thread.start()
-    
-    services=[]
     if use_mqtt == '1':
         client = mqtt.Client(mqtt_topic)  # Create instance of client
         mqtt_bg = threading.Thread(target=connect_mqtt, daemon=True)
@@ -2655,7 +3282,6 @@ if __name__ == '__main__':
     serial_thread.start()
     threadcheck = threading.Thread(target=threads_check)
     threadcheck.start()
-    event = threading.Event()
     #serve(socketio, host=bindaddr, port=bindport)
         #app.run(debug=False, host=bindaddr, port=bindport)#, ssl_context='adhoc')
     socketlocal.run(app, host=bindaddr, port=bindport, allow_unsafe_werkzeug=True, debug=False)
