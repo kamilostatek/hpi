@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="{{ theme }}">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+        <meta name="description" content="" />
+	<link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+        <meta name="author" content="" />
+        <title>{% block title %}Haier{% endblock %}</title>
+
+        <!-- Inter font (Google Fonts) -->
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700&display=swap" rel="stylesheet">
+        <!-- Favicon-->
+        <link rel="icon" type="image/x-icon" href="../static/favicon.ico" />
+        <!-- Core theme CSS (includes Bootstrap)-->
+        <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+	<!--      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-KK94CHFLLe+nY2dmCWGMq91rCGa5gtU4mk92HdvYe+M/SXH301p5ILy+dN9+nJOZ" crossorigin="anonymous">-->
+	    <!--<script src="{{ url_for('static', filename='jquery-3.6.0.min.js') }}"></script>-->
+        <script src="https://code.jquery.com/jquery-3.7.0.js" integrity="sha256-JlqSTELeR4TLqP0OG9dxM7yDPqX1ox/HfgiSLBj8+kM=" crossorigin="anonymous"></script>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/i18next/23.0.2/i18next.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery-i18next/1.2.1/jquery-i18next.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/i18next-http-backend/2.1.1/i18nextHttpBackend.min.js"></script>
+
+        {% if theme is defined %}
+         <link rel="stylesheet" href="{{ url_for('static', filename=theme+'.css') }}" id="theme-style">
+        {% else %}
+         <link rel="stylesheet" href="{{ url_for('static', filename='light.css') }}" id="theme-style">
+        {% endif %}
+        <link rel="stylesheet" href="{{ url_for('static', filename='fonts.css') }}">
+        <script src="{{ url_for('static', filename='sweetalert2.min.js') }}"></script>
+        {% block custom_scripts %}
+        {% endblock %}
+<style>
+
+
+
+.bi {
+  width: 1em;
+  height: 1em;
+  fill: currentcolor;
+}
+
+.color-modes {
+  .dropdown-menu {
+    padding: .25rem;
+
+    li + li {
+      margin-top: .125rem;
+    }
+  }
+
+  .dropdown-item {
+    @include border-radius(.25rem);
+  }
+
+  .active {
+    font-weight: 600;
+
+    .bi {
+      display: block !important; // stylelint-disable-line declaration-no-important
+    }
+  }
+}
+
+/* --- HPi service status pill (navbar) --- */
+.hpi-status-pill{
+  display:inline-flex;
+  align-items:center;
+  gap:.5rem;
+  padding:.15rem .6rem;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.15);
+  background: rgba(0,0,0,.12);
+  color: inherit;
+  opacity: .18;
+  /*
+    Unikamy CSS `filter` na przycisku HPi.
+    Na części konfiguracji (zwłaszcza zdalne pulpity / starsze GPU) przełączanie/animowanie `filter`
+    potrafi powodować chwilowe „wyszarzenie”/miganie antyaliasingu tekstu w całym UI.
+    Zostawiamy tylko zmianę opacity + tła/obramowania.
+  */
+  transition: opacity .2s ease, background-color .2s ease, border-color .2s ease;
+  line-height: 1;
+}
+.hpi-status-wrap{ display:flex; align-items:center; }
+.hpi-status-wrap:hover .hpi-status-pill,
+.hpi-status-pill.hpi-reveal{
+  opacity: 1;
+  border-color: rgba(13,110,253,.45);
+  background: rgba(13,110,253,.08);
+}
+.hpi-status-label{ font-size:.85rem; letter-spacing:.02em; }
+.hpi-status-led{
+  width:.8rem; height:.8rem;
+  border-radius:50%;
+  display:inline-block;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.35) inset;
+}
+.hpi-led-unknown{ background:#6c757d; }
+.hpi-led-ok{
+  background:#0d6efd; /* bootstrap primary (blue) */
+  box-shadow: 0 0 6px rgba(13,110,253,.65);
+}
+.hpi-led-err{
+  background:#dc3545; /* bootstrap danger (red) */
+  box-shadow: 0 0 8px rgba(220,53,69,.65);
+  animation: hpiBlink 1s infinite;
+}
+@keyframes hpiBlink{
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: .25; }
+}
+
+/* --- Language flags: use SVG icons (reliable on desktop; emojis can be missing) --- */
+.lang-flag{
+  width: 1.25rem;
+  height: 1.25rem;
+  display: inline-block;
+  vertical-align: middle;
+  border-radius: .2rem;
+}
+
+/* Topbar value/status boxes: fixed widths so layout doesn't jump (CO & CWU) */
+.input-group .topbar-setpoint{
+  width: 74.39px !important;
+  min-width: 74.39px !important;
+  max-width: 74.39px !important;
+  flex: 0 0 74.39px !important;
+  flex-shrink: 0 !important;
+  display: inline-flex !important;
+  justify-content: center;
+  align-items: center;
+  padding-left: .35rem;
+  padding-right: .35rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  box-sizing: border-box;
+}
+.input-group .topbar-setpoint b{ font-variant-numeric: tabular-nums; }
+.topbar-setpoint--readonly{ cursor: default; } /* indicator-only */
+
+.input-group .topbar-statusbox{
+  width: 42px !important;
+  min-width: 42px !important;
+  max-width: 42px !important;
+  flex: 0 0 42px !important;
+  flex-shrink: 0 !important;
+  display: inline-flex !important;
+  justify-content: center;
+  align-items: center;
+  padding: 0 !important;            /* keep total width exactly 42 */
+  box-sizing: border-box;
+}
+.input-group .topbar-statusbox > i{ line-height: 1; }
+/* Extra specificity: force 42px status boxes in card headers */
+div.input-group.card-header > span.input-group-text.topbar-statusbox{
+  width: 42px !important;
+  min-width: 42px !important;
+  max-width: 42px !important;
+  flex: 0 0 42px !important;
+  padding: 0 !important;
+  box-sizing: border-box;
+}
+
+
+
+/* Sidebar: lżejsze napisy w lewym menu (Pulpit/Ustawienia/Wykresy/...) */
+#sidebar-wrapper .navl{
+  font-weight: 300; /* 300 = jeszcze lżej */
+}
+#sidebar-wrapper .navl.active,
+#sidebar-wrapper .navl[aria-current="page"]{
+  font-weight: 500;
+}
+
+</style>
+        
+    </head>
+    <body style="display:none" data-page="{{ page_id|default('') }}">
+    <div class="overlay" id="overlay">
+        <div id="text-container"></div>
+        <div class="final-text" id="final-text">HaierPi 1.4</div>
+    </div>
+
+	        <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+      <symbol id="bootstrap" viewBox="0 0 118 94">
+        <path fill="currentColor" fill-rule="evenodd" d="M24.509 0c-6.733 0-11.715 5.893-11.492 12.284.214 6.14-.064 14.092-2.066 20.577C8.943 39.365 5.547 43.485 0 44.014v5.972c5.547.529 8.943 4.649 10.951 11.153 2.002 6.485 2.28 14.437 2.066 20.577C12.794 88.106 17.776 94 24.51 94H93.5c6.733 0 11.714-5.893 11.491-12.284-.214-6.14.064-14.092 2.066-20.577 2.009-6.504 5.396-10.624 10.943-11.153v-5.972c-5.547-.529-8.934-4.649-10.943-11.153-2.002-6.484-2.28-14.437-2.066-20.577C105.214 5.894 100.233 0 93.5 0H24.508zM80 57.863C80 66.663 73.436 72 62.543 72H44a2 2 0 0 1-2-2V24a2 2 0 0 1 2-2h18.437c9.083 0 15.044 4.92 15.044 12.474 0 5.302-4.01 10.049-9.119 10.88v.277C75.317 46.394 80 51.21 80 57.863M60.521 28.34H49.948v14.934h8.905c6.884 0 10.68-2.772 10.68-7.727 0-4.643-3.264-7.207-9.012-7.207M49.948 49.2v16.458H60.91c7.167 0 10.964-2.876 10.964-8.281s-3.903-8.178-11.425-8.178H49.948z" clip-rule="evenodd"/>
+      </symbol>
+      <symbol id="check2" viewBox="0 0 16 16">
+        <path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0"/>
+      </symbol>
+      <symbol id="circle-half" viewBox="0 0 16 16">
+        <path d="M8 15A7 7 0 1 0 8 1zm0 1A8 8 0 1 1 8 0a8 8 0 0 1 0 16"/>
+      </symbol>
+      <symbol id="moon-stars-fill" viewBox="0 0 16 16">
+        <path d="M6 .278a.77.77 0 0 1 .08.858 7.2 7.2 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277q.792-.001 1.533-.16a.79.79 0 0 1 .81.316.73.73 0 0 1-.031.893A8.35 8.35 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.75.75 0 0 1 6 .278"/>
+        <path d="M10.794 3.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387a1.73 1.73 0 0 0-1.097 1.097l-.387 1.162a.217.217 0 0 1-.412 0l-.387-1.162A1.73 1.73 0 0 0 9.31 6.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387a1.73 1.73 0 0 0 1.097-1.097zM13.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.16 1.16 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.16 1.16 0 0 0-.732-.732l-.774-.258a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732z"/>
+      </symbol>
+      <symbol id="sun-fill" viewBox="0 0 16 16">
+        <path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8M8 0a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 0m0 13a.5.5 0 0 1 .5.5v2a.5.5 0 0 1-1 0v-2A.5.5 0 0 1 8 13m8-5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2a.5.5 0 0 1 .5.5M3 8a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1 0-1h2A.5.5 0 0 1 3 8m10.657-5.657a.5.5 0 0 1 0 .707l-1.414 1.415a.5.5 0 1 1-.707-.708l1.414-1.414a.5.5 0 0 1 .707 0m-9.193 9.193a.5.5 0 0 1 0 .707L3.05 13.657a.5.5 0 0 1-.707-.707l1.414-1.414a.5.5 0 0 1 .707 0m9.193 2.121a.5.5 0 0 1-.707 0l-1.414-1.414a.5.5 0 0 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .707M4.464 4.465a.5.5 0 0 1-.707 0L2.343 3.05a.5.5 0 1 1 .707-.707l1.414 1.414a.5.5 0 0 1 0 .708"/>
+      </symbol>
+    </svg>
+<div id="liveAlertPlaceholder"></div>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, message in messages %}
+    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+ {{ message }}
+	<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+</div>
+
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+        <div class="d-flex" id="wrapper">
+            <!-- Sidebar-->
+            <div class="border-end d-flex flex-column" id="sidebar-wrapper">
+		    <div class="sidebar-heading border-bottom">Haier Pi <sup>{{ version }}</sup></div>
+                <div class="list-group list-group-flush mb-auto">
+			<a class="list-group-item navl list-group-item-action p-3" href="/" data-i18n="dashboard">Dashboard</a>
+			<a class="list-group-item navl list-group-item-action p-3" href="/settings" data-i18n="settings">Settings</a>
+			<a class="list-group-item navl list-group-item-action p-3" href="/parameters" data-i18n="parameters">Parameters</a>
+			<a class="list-group-item navl list-group-item-action p-3" href="/scheduler" data-i18n="scheduler">Scheduler</a>
+                        <a class="list-group-item navl list-group-item-action p-3" href="/charts" data-i18n="charts">Charts</a>
+                </div>
+                {% if is_logged_in() %}
+                <div class="dropdown p-3">
+                    <a href="#" class="d-flex align-items-center position-relative link-body-emphasis text-decoration-none dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                        <img src="/static/person.svg" alt="" width="32" height="32" class="rounded-circle me-2">
+                        <strong>{{ get_username() }}</strong>
+                        {% if needrestart == 1 %}
+                        <span class="position-absolute top-0 start-0 translate-middle p-2 bg-danger border border-light rounded-circle"></span>
+                        {% endif %}
+                    </a>
+                    <ul class="dropdown-menu text-small shadow p-3" style="">
+			    <li><a class="dropdown-item" id="changePasswordBtn" href="#" data-i18n="ui.change_password">Change password</a></li>
+			    <!--<li><a class="dropdown-item" onclick="updatecheck()" href="#">{{ _('Check for update') }}</a></li> -->
+			   <li><a class="dropdown-item" href="/backup" data-i18n="ui.download_backup">Download Backup</a></li>
+                           <li><a class="dropdown-item" href="/restore" data-i18n="ui.restore_backup">Restore from Backup</a></li>
+
+                        <li><hr class="dropdown-divider"></li>
+			<li><a class="dropdown-item position-relative" id="restartServiceBtn" href="#">{{ _('Restart') }}
+                        {% if needrestart == 1 %}
+                            <span class="position-absolute top-50 start-100 translate-middle p-2 bg-danger border border-light rounded-circle"></span>
+                            {% endif %}
+                        </a></li>
+                        <li><hr class="dropdown-divider"></li>
+			<li><a class="dropdown-item" href="/logout" data-i18n="ui.logout">Log out</a></li>
+                    </ul>
+                </div>
+                {% endif %}
+            </div>
+            <!-- Page content wrapper-->
+            <div id="page-content-wrapper">
+                <!-- Top navigation-->
+                <nav class="navbar navbar-expand-lg navbar-light border-bottom">
+                    <div class="container-fluid">
+			            <button class="navbar-toggler" type="button" id="sidebarToggle"><span class="navbar-toggler-icon"></span></button>
+<ul class="navbar-nav ms-auto d-flex flex-row gap-3 align-items-center">
+{% if is_logged_in() %}
+<li class="nav-item hpi-status-wrap">
+  <button type="button" id="hpi-status-pill" class="hpi-status-pill" data-bs-title="HPi: sprawdzanie...">
+    <span class="hpi-status-label">HPi</span>
+    <span id="hpi-status-led" class="hpi-status-led hpi-led-unknown" aria-hidden="true"></span>
+  </button>
+</li>
+{% endif %}
+
+				<li class="nav-item">
+					<button class="btn btn-text px-0 text-decoration-none dropdown-toggle bd-mode-toggle" id="bd-theme" type="button" aria-expanded="false" data-bs-toggle="dropdown" data-bs-display="static" aria-label="Zmień skórkę (auto)">
+              <svg class="bi my-1 me-2 theme-icon-active"><use href="#circle-half"></use></svg>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="bd-theme" id="bd-theme-text" style="--bs-dropdown-min-width: 8rem;">
+              <li>
+                <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="light" aria-pressed="false">
+                  <svg class="bi me-2 opacity-50 theme-icon"><use href="#sun-fill"></use></svg>
+                  Light
+                  <svg class="bi ms-auto d-none"><use href="#check2"></use></svg>
+                </button>
+              </li>
+              <li>
+                <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="dark" aria-pressed="false">
+                  <svg class="bi me-2 opacity-50 theme-icon"><use href="#moon-stars-fill"></use></svg>
+                  Dark
+                  <svg class="bi ms-auto d-none"><use href="#check2"></use></svg>
+                </button>
+              </li>
+              <li>
+                <button type="button" class="dropdown-item d-flex align-items-center active" data-bs-theme-value="auto" aria-pressed="true">
+                  <svg class="bi me-2 opacity-50 theme-icon"><use href="#circle-half"></use></svg>
+                  Auto
+                  <svg class="bi ms-auto d-none"><use href="#check2"></use></svg>
+                </button>
+              </li>
+            </ul>
+				</li>
+                                <li class="nav-item dropdown">
+                                    <a class="nav-link dropdown-toggle" id="navbarDropdown" href="#" role="button" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                                      <img id="current-lang-flag" class="lang-flag" src="/static/flags/en.svg" alt="EN">
+                                    </a>
+                                    <div class="dropdown-menu dropdown-menu-end" aria-labelledby="navbarDropdown">
+                                        <a class="dropdown-item lang-selector" data-lang="en" id="lang-en" href="#"><img class="lang-flag me-2" src="/static/flags/en.svg" alt="EN">English</a>
+                                        <a class="dropdown-item lang-selector" data-lang="pl" id="lang-pl" href="#"><img class="lang-flag me-2" src="/static/flags/pl.svg" alt="PL">Polski</a>
+                                        <a class="dropdown-item lang-selector" data-lang="nl" id="lang-nl" href="#"><img class="lang-flag me-2" src="/static/flags/nl.svg" alt="NL">Nederlands</a>
+                                    </div>
+                                </li>
+                            </ul>
+		    </div>
+                </nav>
+                <!-- Page content-->
+                        {% block page_body %}
+                        {% endblock %}
+{% if is_logged_in() %}
+<!-- Global modals: available on every page -->
+<div class="modal fade" id="restartModal" tabindex="-1" aria-lebelledby="restartModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 data-i18n="restartsercice" class="modal-title">Service restart</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div>Czy jesteś pewny że chcesz zrestartować usługę?</div>
+                <button class="btn btn-danger" id="restartBtn">Restart</button>
+                <button class="btn btn-secondary" data-bs-dismiss="modal">Anuluj</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="passwordModal" tabindex="-1" aria-labelledby="passwordModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Zmień hasło</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="newPassword" class="form-label">Nowe hasło</label>
+                    <input type="password" class="form-control" id="newPassword" required>
+                    <div class="invalid-feedback">Hasło musi mieć min. 8 znaków, wielką literę, cyfrę i znak specjalny.</div>
+                </div>
+                <div class="mb-3">
+                    <label for="confirmPassword" class="form-label">Powtórz hasło</label>
+                    <input type="password" class="form-control" id="confirmPassword" required>
+                    <div class="invalid-feedback">Hasła nie są identyczne.</div>
+                </div>
+                <button class="btn btn-outline-success w-100" id="submitBtn" disabled>Zmień hasło</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+<!-- End global modals -->
+
+<!--<div class="dropdown position-fixed bottom-0 end-0 mb-3 me-3 bd-mode-toggle">
+      <button class="btn btn-bd-primary py-2 dropdown-toggle d-flex align-items-center" id="bd-theme" type="button" aria-expanded="false" data-bs-toggle="dropdown" aria-label="Toggle theme (dark)">
+        <svg class="bi my-1 iconmoon" width="1em" height="1em"></svg>
+        <span class="visually-hidden" id="bd-theme-text">Zmień skórkę</span>
+      </button>
+      <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="bd-theme-text" style="">
+        <li>
+          <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="light" aria-pressed="false" onclick="$('html').attr('data-bs-theme', 'light'); $('#theme-style')[0].href='../static/light.css'; $.post( '/theme', { theme: 'light' } );">
+            <svg class="bi me-2 opacity-50 iconsun" width="1em" height="1em"></svg>
+            Jasna
+            <svg class="bi ms-auto d-none" width="1em" height="1em"><use href="#check2"></use></svg>
+          </button>
+        </li>
+        <li>
+          <button type="button" class="dropdown-item d-flex align-items-center" data-bs-theme-value="dark" aria-pressed="false" onclick="$('html').attr('data-bs-theme', 'dark');$('#theme-style')[0].href='../static/dark.css'; $.post( '/theme', { theme: 'dark' } );">
+            <svg class="bi me-2 opacity-50 iconmoon" width="1em" height="1em"></svg>
+            Ciemna
+            <svg class="bi ms-auto d-none" width="1em" height="1em"><use href="#check2"></use></svg>
+          </button>
+        </li>
+      </ul>
+</div>-->
+            </div>
+        </div>
+        <!-- Bootstrap core JS-->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/js/bootstrap.bundle.min.js" integrity="sha384-ENjdO4Dr2bkBIFxQpeoTz1HIcje39Wm4jDKdf19U8gI4ddQ3GYNS7NTKfAdVQSZe" crossorigin="anonymous"></script>
+        <!-- Core theme JS (common, shared across pages) -->
+        <script src="{{ url_for('static', filename='scripts.js') }}" defer></script>
+        {% if page_id is defined and page_id %}
+        <!-- Page-specific JS (loaded only on the active page) -->
+        <script src="{{ url_for('static', filename='pages/' ~ page_id ~ '.js') }}" defer></script>
+        {% endif %}
+        <script src="{{ url_for('static', filename='custom.js') }}" defer></script>
+        <script src="{{ url_for('static', filename='hpi_status.js') }}" defer></script>
+
+			
+	<script src="../static/welcome.js"></script>
+               {% block end_scripts %}
+               {% endblock %}
+    </body>
+</html>
