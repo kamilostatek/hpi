@@ -1,0 +1,3344 @@
+{% extends 'base.html' %}
+{% block title %}Settings{% endblock %}
+{% block custom_scripts %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.3/Chart.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.1/socket.io.min.js" crossorigin="anonymous"
+    referrerpolicy="no-referrer"></script>
+
+<style>
+    /* Some basic CSS styles for the template */
+    p {
+        margin: 0px;
+    }
+
+    h1 {
+        color: #333;
+    }
+
+    .journal-entry {
+        background-color: #cde8cd;
+        margin-bottom: 5px;
+        transition: background-color 0.5s ease-in-out;
+    }
+
+    .journal-entry.fadeout {
+        background-color: transparent;
+        transition: background-color 5s ease-in-out;
+    }
+
+    .disableddiv {
+        pointer-events: none;
+        opacity: 0.4;
+    }
+
+    /* CH Control / Sterowanie ogrzewaniem: ukryj wyszarzane (disabled) pozycje, żeby skrócić stronę */
+    #settings-hcurve-tab .disableddiv {
+        display: none !important;
+    }
+
+
+    /* DHW Control / Sterowanie CWU: ukryj wyszarzane (disabled) pozycje, żeby skrócić stronę */
+    #settings-dhwcontrol-tab .disableddiv {
+        display: none !important;
+    }
+
+    .hidden {
+    display: none;
+    }
+
+    .form-switch-lg>input {
+        width: 50px !important;
+        height: 30px !important;
+    }
+
+    /* Settings: etykiety w list-group bez pogrubienia */
+    #settingsForm .list-group-item strong.mb-0 {
+        font-weight: 400;
+        /* 400 = normal, 500 = lekko grubsze */
+    }
+
+    /* List-group: utrzymaj zaokrąglone rogi także gdy elementy są zagnieżdżone */
+    #settingsForm .list-group {
+        overflow: hidden;
+    }
+
+    /* Zachowaj zaokrąglenia list-group gdy używamy wrappera do show/hide */
+    dhw_settings {
+        display: contents;
+    }
+
+    /* HPI App: status/session in boxed fields */
+    #hpistatus, #hpisid {
+        font-weight: 400;
+    }
+
+    /* ===== Mobile UX for Settings ===== */
+    @media (max-width: 576px) {
+
+        /* Tabs: one row, horizontal scroll */
+        #settings {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+            gap: .25rem;
+            padding-bottom: .25rem;
+        }
+
+        #settings::-webkit-scrollbar {
+            display: none;
+        }
+
+        #settings .nav-link {
+            white-space: nowrap;
+            padding: .45rem .6rem;
+            font-size: .95rem;
+        }
+
+        /* Content density: reduce paddings a bit */
+        #settingsForm .list-group-item {
+            padding: .65rem .75rem;
+        }
+
+
+        /* Comfortable side gutters (like desktop) */
+        #settingsForm .list-group {
+            margin-left: .75rem;
+            margin-right: .75rem;
+        }
+
+        #saveRow {
+            margin-left: .75rem;
+            margin-right: .75rem;
+        }
+
+        #settingsForm .form-control,
+        #settingsForm .form-select {
+            padding-top: .35rem;
+            padding-bottom: .35rem;
+        }
+
+        /* Save button: normal flow (like desktop) */
+        #saveRow {
+            position: static;
+        }
+
+        /* No extra space needed when Save button is not sticky */
+        .tab-pane {
+            padding-bottom: 0;
+        }
+    }
+
+    /* Service: availability coloring (like HPI App tab) */
+    #service_test_available.svc-available {
+        color: var(--bs-success) !important;
+        /* No green fill — only outline + colored text */
+        background-color: var(--bs-body-bg) !important;
+        border-color: rgba(var(--bs-success-rgb), .35) !important;
+    }
+    #service_test_available.svc-unavailable {
+        color: var(--bs-danger) !important;
+        /* No red fill — only outline + colored text */
+        background-color: var(--bs-body-bg) !important;
+        border-color: rgba(var(--bs-danger-rgb), .35) !important;
+    }
+
+    /* Service: remove spinner arrows from "Czas testu (min)" */
+    #service_test_duration_min::-webkit-outer-spin-button,
+    #service_test_duration_min::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+    #service_test_duration_min {
+        -moz-appearance: textfield;
+        appearance: textfield;
+    }
+
+</style>
+{% endblock %}
+{% block page_body %}
+<div class="modal fade" id="unsavedChangesModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" data-i18n="unsaved.title">Unsaved changes</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <span data-i18n="unsaved.body">You have unsaved changes. Are you sure you want to leave this page?</span>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal" data-i18n="unsaved.stay">Stay</button>
+                <button type="button" class="btn btn-outline-danger" id="leavePageBtn" data-i18n="unsaved.leave">Leave page</button>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="row justify-content-center">
+    <div class="col-12 col-lg-10 col-xl-8 mx-auto">
+
+        <div class="my-3">
+            <!-- Tabs navs -->
+            <ul class="nav nav-underline mb-3" id="settings" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link active" id="settings-general" data-bs-toggle="tab"
+                        data-bs-target="#settings-general-tab" role="tab" aria-controls="settings-general-tab"
+                        aria-selected="true" href="#settings-general-tab" data-i18n="set.general">General</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-hcurve" data-bs-toggle="tab" data-bs-target="#settings-hcurve-tab"
+                        role="tab" aria-controls="settings-hcurve-tab" aria-selected="true" href="#settings-hcurve-tab"
+                        data-i18n="set.coolheat">Heating/Cooling</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-dhwcontrol" data-bs-toggle="tab"
+                        data-bs-target="#settings-dhwcontrol-tab" role="tab" aria-controls="settings-dhwcontrol-tab"
+                        aria-selected="false" href="#settings-dhwcontrol-tab" data-i18n="set.dhwcontrol">Sterowanie
+                        CWU</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-ha" data-bs-toggle="tab" data-bs-target="#settings-ha-tab"
+                        role="tab" aria-controls="settings-ha-tab" aria-selected="false" href="#settings-ha-tab"
+                        data-i18n="set.homeassistant">Home Assistant</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-mqtt" data-bs-toggle="tab" data-bs-target="#settings-mqtt-tab"
+                        role="tab" aria-controls="settings-mqtt-tab" aria-selected="false" href="#settings-mqtt-tab"
+                        data-i18n="set.mqtt">MQTT</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-hpiapp" data-bs-toggle="tab" data-bs-target="#settings-hpiapp-tab"
+                        role="tab" aria-controls="settings-hpiapp-tab" aria-selected="false" href="#settings-hpiapp-tab"
+                        data-i18n="set.hpiapp">Aplikacja HPi</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-system" data-bs-toggle="tab" data-bs-target="#settings-system-tab"
+                        role="tab" aria-controls="settings-system-tab" aria-selected="false" href="#settings-system-tab"
+                        data-i18n="set.system">System</a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a class="nav-link" id="settings-service" data-bs-toggle="tab"
+                        data-bs-target="#settings-service-tab" role="tab" aria-controls="settings-service-tab"
+                        aria-selected="false" href="#settings-service-tab" data-i18n="set.service">Service</a>
+                </li>
+            </ul>
+            <!-- Tabs navs -->
+
+            <!-- Tabs content -->
+            <form id="settingsForm" method="POST" onsubmit="return false;">
+                <div class="tab-content" id="ex1-content">
+                    <div class="tab-pane fade show active" id="settings-general-tab" role="tabpanel"
+                        aria-labelledby="settings-general">
+
+                        <!-- Grouped: General settings -->
+
+                        <!-- Slightly smaller gap before error box (match other tabs) -->
+                        <div class="list-group mb-4 shadow">
+
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.intempsensor">Czujnik temperatury
+                                            wewnętrznej</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.intempsensortooltip"
+                                            data-bs-title="Wybierz jakiego czujnika temperatury używasz ? (<i>'HA'</i> - dla encji z Home Assistant, <i>'Wbudowany'</i> - fizycznie podłączony sensor DHT22"></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <select class="form-select" aria-label="insidetemp"
+                                                name="SETTINGS$insidetemp" value="">
+                                                <option data-i18n="ha" value="ha">HA</option>
+                                                <option data-i18n="builtin" value="builtin">Builtin</option>
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.emergency_intemp">Emergency inside
+                                            temp</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.emergency_intemp_tooltip"
+                                            data-bs-title="When there is no inside temperature reading from sensors / Home Assistant (e.g. after reboot or failure), the system will use this value to keep heating."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" name="SETTINGS$emergency_intemp"
+                                            step="0.1" min="5" max="35" value="">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.huminsensor">huminsensor</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.humintooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <select class="form-select" aria-label="humidity" name="SETTINGS$humidity"
+                                                value="">
+                                                <option data-i18n="ha" value="ha">HA</option>
+                                                <option data-i18n="builtin" value="builtin">Builtin</option>
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.outtempsensor">Czujnik temperatury
+                                            zewnętrznej</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.outtempsensortooltip"
+                                            data-bs-title="What temperature sensor you using (ha - for home assistant entity, builtin - for physically connect DS18b20 sensor, Tao - for built-in pump ambient sensor, Open Meteo - for online weather service ( you need to provide the coordinates of your town )"></i>
+
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <select id="outsidetemp" class="form-select" aria-label="outsidetemp"
+                                                name="SETTINGS$outsidetemp" value="">
+                                                <option data-i18n="ha" value="ha">HA</option>
+                                                <option data-i18n="builtin" value="builtin">Builtin</option>
+                                                <option data-i18n="tao" value="tao">Tao</option>
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                                        <div class="tab-pane fade" id="settings-dhwcontrol-tab" role="tabpanel"
+                        aria-labelledby="settings-dhwcontrol">
+
+                        <!-- CWU: włącz/wyłącz -->
+                        <div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.dhwuse">Używać grzania CWU ?</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.dhwusetooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="dhwuse_hidden" value="" name="SETTINGS$dhwuse">
+                                            <input type="checkbox" class="form-check-input" id="dhwuse" value="1"
+                                                aria-describedby="dhwuse">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- CWU: reszta ustawień (wyszarz i zablokuj gdy CWU wyłączone) -->
+                        <div id="dhw_dependent">
+                            <!-- CWU: czujnik temperatury -->
+                            <div class="list-group mb-4 shadow">
+                                <div class="list-group-item">
+                                    <div class="row align-items-center">
+                                        <div class="col">
+                                            <strong class="mb-0" data-i18n="set.dhwtempsensor">Czujnik temperatury CWU</strong>
+                                            <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                                data-bs-placement="bottom" data-bs-html="true"
+                                                data-i18n="[data-bs-title]set.dhwtempsensortooltip"
+                                                data-bs-title="Choose the DHW temperature source: built-in sensor or Home Assistant entity"></i>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <div class="custom-control custom-switch">
+                                                <select class="form-select" name="SETTINGS$dhwtemp">
+                                                    <option data-i18n="builtin" value="builtin" {% if dhwtemp=="builtin" %}selected{% endif %}>Builtin</option>
+                                                    <option data-i18n="ha" value="ha" {% if dhwtemp=="ha" %}selected{% endif %}>HA</option>
+                                                </select>
+                                                <span class="custom-control-label"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- CWU: grzanie bez limitu + tryb -->
+                            <div class="list-group mb-4 shadow">
+                                <div class="list-group-item">
+                                    <div class="row align-items-center">
+                                        <div class="col">
+                                            <strong class="mb-0" data-i18n="set.dhwnolimit">Grzanie CWU bez limitu i w wybranym trybie</strong>
+                                            <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                                data-bs-placement="bottom" data-bs-html="true"
+                                                data-i18n="[data-bs-title]set.dhwnolimittooltip" data-bs-title="."></i>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                                <input type="hidden" id="dhwwl_hidden" value="" name="SETTINGS$dhwwl">
+                                                <input type="checkbox" class="form-check-input" id="dhwwl" value="1"
+                                                    aria-describedby="dhwwl">
+                                                <span class="custom-control-label"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div id="dhw_mode_settings" class="list-group-item">
+                                    <div class="row align-items-center">
+                                        <div class="col">
+                                            <strong class="mb-0" data-i18n="set.dhwnolimit_mode">Wybierz tryb grzania CWU</strong>
+                                            <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                                data-bs-placement="bottom" data-bs-html="true"
+                                                data-i18n="[data-bs-title]set.dhwnolimit_modetooltip"
+                                                data-bs-title="."></i>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <select class="form-select" aria-label="dhwnolimit_mode"
+                                                id="dhwnolimit_mode" name="SETTINGS$dhwnolimit_mode" value="">
+                                                <option value="turbo">Turbo</option>
+                                                <option value="eco">Eco</option>
+                                                <option value="quiet">Quiet</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- CWU: harmonogram -->
+                            <div class="list-group mb-4 shadow">
+                                <div class="list-group-item">
+                                    <div class="row align-items-center">
+                                        <div class="col">
+                                            <strong class="mb-0" data-i18n="set.dhwscheduler">Używaj harmonogramu dla CWU</strong>
+                                            <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                                data-bs-placement="bottom" data-bs-html="true"
+                                                data-i18n="[data-bs-title]set.dhwschedulertooltip"
+                                                data-bs-title="."></i>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                                <input type="hidden" id="dhwscheduler_hidden" value=""
+                                                    name="SETTINGS$dhwscheduler">
+                                                <input type="checkbox" class="form-check-input" id="dhwscheduler"
+                                                    value="1" aria-describedby="dhwscheduler">
+                                                <span class="custom-control-label"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+<div class="tab-pane fade" id="settings-hcurve-tab" role="tabpanel"
+                        aria-labelledby="settings-hcurve">
+
+                        <div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.heatcontrol">{{ _('Sterowanie ogrzewaniem')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.heatcontroltooltip" data-bs-title="."></i>
+                                    </div>
+
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <select class="form-select" aria-label="heatingcontrol" id="heatingcontrol">
+                                                <option value="curve" data-i18n="set.heatcontrol.curve" {% if
+                                                    heatingcurve !='directly' %}selected{% endif %}>{{ _('Krzywa
+                                                    grzewcza') }}</option>
+                                                <option value="direct" data-i18n="set.heatcontrol.direct" {% if
+                                                    heatingcurve=='directly' %}selected{% endif %}>{{ _('Bezpośrednio')
+                                                    }}</option>
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        
+                        <!-- Thermostat (global): used in Curve + Direct -->
+                        <div id="thermostat_section" class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.directthermostat">{{ _('Sterowanie ogrzewaniem poprzez termostat') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.directthermostattooltip"
+                                            data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="thermostat_on_hidden" value="" name="SETTINGS$thermostat_on">
+                                            <input type="checkbox" class="form-check-input" id="thermostat_on" aria-describedby="thermostat_on">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="list-group-item" id="div_lohysteresis">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.lohysteresis">{{ _('Histereza dolna (włączenia)') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.lohysteresis_tooltip"
+                                            data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="lohysteresis"
+                                                name="SETTINGS$lohysteresis" aria-describedby="lohysteresis"
+                                                step="0.1" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="list-group-item" id="div_hihysteresis">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hihysteresis">{{ _('Histereza górna (wyłączenia)') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hihysteresis_tooltip"
+                                            data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="hihysteresis"
+                                                name="SETTINGS$hihysteresis" aria-describedby="hihysteresis"
+                                                step="0.1" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        
+<div id="heatingcurve_section"
+                            class="list-group mb-4 shadow {% if heatingcurve == 'directly' %}disableddiv{% endif %}">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hctype">{{ _('Typ krzywej grzewczej')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hctypetooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="hidden" id="heatingcurve_hidden" name="SETTINGS$heatingcurve"
+                                                value="{{ heatingcurve }}">
+                                            <select class="form-select" aria-label="heatingcurve" id="heatingcurve"
+                                                value="">
+                                                <option value="auto" data-i18n="auto">{{ _('Automatyczna') }}</option>
+                                                <option value="static" data-i18n="static">{{ _('Statyczna') }}</option>
+                                                <option value="manual" data-i18n="manual">{{ _('Ręczna') }}</option>
+
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hctime">{{ _('Częstotliwość obliczania
+                                            krzywej grzewczej w minutach') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hctimetooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="timeout" name="MAIN$heizfreq"
+                                                aria-describedby="timeout" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="divslope" class="list-group-item 
+                            {% if heatingcurve == " auto" or heatingcurve=="static" %} NONE {% else %} disableddiv {% endif %}">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hcslope">{{ _('Nachylenie krzywej grzeczej')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hcslopetooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="slope" name="SETTINGS$hcslope"
+                                                aria-describedby="slope" step="0.01" onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="divpshift" class="list-group-item 
+                            {% if heatingcurve != 'auto' %} disableddiv {% endif %}">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hcpshift">{{ _('Przesunięcie równoległe
+                                            krzywej grzewczej') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hcpshifttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="pshift"
+                                                name="SETTINGS$hcpshift" aria-describedby="pshift" step="0.1"
+                                                onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="divhcamp" 
+                            class="list-group-item{% if heatingcurve != 'auto' %} disableddiv {% endif %}">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hcamp">{{ _('Wzmocnienie krzywej grzewczej')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hcamptooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="hcamp" name="SETTINGS$hcamp"
+                                                aria-describedby="hcamp" step="0.1" onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hcchart">{{ _('Wykres krzywej grzewczej')
+                                            }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <button class="btn btn-primary" type="button" data-bs-toggle="collapse"
+                                            data-bs-target="#chartdiv" data-i18n="show" aria-expanded="false"
+                                            aria-controls="chartdiv">{{ _('Show') }}</button>
+                                    </div>
+                                    <div id="chartdiv" class="collapse">
+                                        <p><label for="tempRange" id="customtemp" data-i18n="set.intemp"
+                                                class="form-label">{{ _('Temperatura wewnątrz: 21') }}</label></p>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.intemptooltip" data-bs-title="."></i>
+
+                                        <input type="range" class="form-range" min="12" max="30" id="tempRange"
+                                            onchange="recalc();">
+                                        <canvas id="hcurvechart"></canvas>
+
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="divhcmanual" 
+                            class="list-group-item{% if heatingcurve != 'manual' %} disableddiv {% endif %}">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hcman">{{ _('Zadana temperatura C.O dla
+                                            ręcznej krzywej:') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hcmantooltip" data-bs-title="."></i>
+                                        <p class="mb-0">
+                                        <table class="table" id="hcmantable">
+                                            <thead>
+                                                <tr>
+                                                    <th scope="col">-20</th>
+                                                    <th scope="col">-15</th>
+                                                    <th scope="col">-10</th>
+                                                    <th scope="col">-8</th>
+                                                    <th scope="col">-6</th>
+                                                    <th scope="col">-4</th>
+                                                    <th scope="col">-2</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody class="table-group-divider">
+                                                <tr>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn20" aria-describedby="hcmn20" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn15" aria-describedby="hcmn15" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn10" aria-describedby="hcmn10" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn8" aria-describedby="hcmn8" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn6" aria-describedby="hcmn6" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn4" aria-describedby="hcmn4" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmn2" aria-describedby="hcmn2" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                </tr>
+                                                <thead>
+                                                    <tr>
+                                                        <th scope="col">0</th>
+                                                        <th scope="col">2</th>
+                                                        <th scope="col">4</th>
+                                                        <th scope="col">6</th>
+                                                        <th scope="col">8</th>
+                                                        <th scope="col">10</th>
+                                                        <th scope="col">15</th>
+                                                    </tr>
+                                                </thead>
+                                            <tbody class="table-group-divider">
+                                                <tr>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcm0" aria-describedby="hcm0" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmp2" aria-describedby="hcmp2" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmp4" aria-describedby="hcmp4" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmp6" aria-describedby="hcmp6" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmp8" aria-describedby="hcmp8" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmp10" aria-describedby="hcmp10" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                    <td class="p-0 p-md-2"><input type="number" class="form-control"
+                                                            id="hcmp15" aria-describedby="hcmp15" step="0.5"
+                                                            onchange="manual_hcurve()" value=""></td>
+                                                </tr>
+                                                <input type="hidden" class="form-control" value="" id="hcman"
+                                                    name="SETTINGS$hcman" aria-describedby="hcman">
+                                            </tbody>
+                                        </table>
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                            <!--<button type="submit" class="btn btn-primary" data-i18n="set.btn.save">{{ _('Zapisz ustawienia') }}</button>-->
+                        </div>
+
+
+<!-- Direct mode: inside setpoint (only used when thermostat_on=1) -->
+                        <div id="direct_inside_section"
+                            class="list-group mb-4 shadow {% if heatingcurve != 'directly' %}disableddiv{% endif %}">
+                            <div class="list-group-item" id="direct_inside_settemp_item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.directinsidesettemp">{{ _('Zadana temperatura wewnątrz w trybie bezpośrednim') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.directinsidesettemptooltip"
+                                            data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="direct_inside_settemp"
+                                                name="SETTINGS$direct_inside_settemp"
+                                                aria-describedby="direct_inside_settemp" step="0.5" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+
+                                                <!-- Frequency limit (separate section) -->
+                        <div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.freqlimit">{{ _('Ograniczenie
+                                            częstotliwości') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.freqlimittooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <select class="form-select" aria-label="flimit" name="SETTINGS$flimit"
+                                                value="">
+                                                <option value="auto" data-i18n="auto">{{ _('Automatyczne') }}</option>
+                                                <option value="manual" data-i18n="manual">{{ _('Ręczne') }}</option>
+
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Mode change -->
+                        <div class="list-group mb-4 shadow" id="presetchange_section">
+                            <div class="list-group-item {% if antionoff == " 1" %} disableddiv {% endif %}"
+                                id="divpresetchange">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.presetchange">{{ _('Zmiana trybu')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.presetchangetooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <select class="form-select" aria-label="presetautochange"
+                                                name="SETTINGS$presetautochange" value="">
+                                                <option value="auto" data-i18n="auto">{{ _('Automatyczna') }}</option>
+                                                <option value="manual" data-i18n="manual">{{ _('Ręczna') }}</option>
+
+                                            </select>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Preset temperature thresholds (FLimit / Quiet / Turbo) -->
+                        <div class="list-group mb-4 shadow" id="presettemps_section">
+                            <div class="list-group-item {% if antionoff == " 1" %}disableddiv{% endif %}"
+                                id="divflimittemp">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.freqlimittemp">{{ _('Temperatura
+                                            ograniczenia częstotliwości') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.freqlimittemptooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="flimittemp"
+                                                name="SETTINGS$flimittemp" aria-describedby="flimittemp" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="list-group-item {% if antionoff == " 1" %}disableddiv{% endif %}"
+                                id="divpresetquiet">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.quiettemp">{{ _('Temperatura trybu Quiet')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.quiettemptooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="presetquiet"
+                                                name="SETTINGS$presetquiet" aria-describedby="presetquiet" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="list-group-item {% if antionoff == " 1" %}disableddiv{% endif %}"
+                                id="divpresetturbo">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.turbotemp">{{ _('Temperatura trybu Turbo')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.turbotemptooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="presetturbo"
+                                                name="SETTINGS$presetturbo" aria-describedby="presetturbo" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+<div class="list-group mb-4 shadow">
+                            <div class="list-group-item ">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.aooddelta">{{ _('Anty ON-OFF
+                                            "<i>Delta</i>"') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.aoodtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div
+                                            class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="antionoff_hidden" value=""
+                                                name="SETTINGS$antionoff">
+                                            <input type="checkbox" class="form-check-input" id="antionoff"
+                                                aria-describedby="antionoff">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
+                            <div id="antionoffsettings" class="list-group-item {% if antionoff != " 1" %} disableddiv {%
+                                endif %}">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.aoodt">{{ _('Czas przeliczania
+                                            <i>Delty</i>') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.aoodttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="antionoffdeltatime"
+                                                name="SETTINGS$antionoffdeltatime" aria-describedby="antionoffdeltatime"
+                                                step="0.5" onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.aoodtdv">{{ _('Wartość <i>Delty</i> dla
+                                            trybu Turbo') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.aoodtdvtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="deltatempturbo"
+                                                name="SETTINGS$deltatempturbo" aria-describedby="deltatempturbo"
+                                                step="0.1" onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.aoodqdv">{{ _('Wartość <i>Delty</i> dla
+                                            trybu Quiet') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.aoodqdvtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="deltatempquiet"
+                                                name="SETTINGS$deltatempquiet" aria-describedby="deltatempquiet"
+                                                step="0.1" onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.aoodflv">{{ _('Wartość <i>Delty</i> dla
+                                            Ograniczenia częstotliwości') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.aoodflvtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="number" class="form-control" id="deltatempflimit"
+                                                name="SETTINGS$deltatempflimit" aria-describedby="deltatempflimit"
+                                                step="0.1" onchange="recalc()" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+
+                                                <!-- Temperature Zones (Frost / Warm) -->
+                        <div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.zone_frost">{{ _('Strefa mrozu') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.zone_frosttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="zone_frost_enable_hidden" value=""
+                                                name="SETTINGS$zone_frost_enable">
+                                            <input type="checkbox" class="form-check-input" id="zone_frost_enable"
+                                                aria-describedby="zone_frost_enable">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            
+                            <div id="zone_frost_settings" class="list-group-item disableddiv">
+                                <div class="row align-items-center mb-2">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.zone_frost_temp">{{ _('Poniżej jakiej temperatury') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" id="zone_frost_temp"
+                                            name="SETTINGS$zone_frost_temp" step="0.1" value="">
+                                    </div>
+                                </div>
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.zone_frost_mode">{{ _('Tryb pracy w strefie mrozu') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <select class="form-select" aria-label="zone_frost_mode"
+                                            id="zone_frost_mode" name="SETTINGS$zone_frost_mode" value="">
+                                            <option value="turbo">Turbo</option>
+                                            <option value="eco">Eco</option>
+                                            <option value="quiet">Quiet</option>
+                                            <option value="quiet_flimit">Quiet + FLimit</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            
+                        </div>
+
+                        <div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.zone_warm">{{ _('Strefa dodatnia') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.zone_warmtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="zone_warm_enable_hidden" value=""
+                                                name="SETTINGS$zone_warm_enable">
+                                            <input type="checkbox" class="form-check-input" id="zone_warm_enable"
+                                                aria-describedby="zone_warm_enable">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            
+                            <div id="zone_warm_settings" class="list-group-item disableddiv">
+                                <div class="row align-items-center mb-2">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.zone_warm_temp">{{ _('Powyżej jakiej temperatury') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" id="zone_warm_temp"
+                                            name="SETTINGS$zone_warm_temp" step="0.1" value="">
+                                    </div>
+                                </div>
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.zone_warm_mode">{{ _('Tryb pracy w strefie dodatniej') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <select class="form-select" aria-label="zone_warm_mode" id="zone_warm_mode"
+                                            name="SETTINGS$zone_warm_mode" value="">
+                                            <option value="turbo">Turbo</option>
+                                            <option value="eco">Eco</option>
+                                            <option value="quiet" data-i18n="set.zone_warm_mode_quiet">{{ _('Quiet') }}</option>
+                                            <option value="quiet_flimit" data-i18n="set.zone_warm_mode_quietflimit">{{ _('Quiet + FLimit') }}</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+<div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.antifreeze_custom">{{ _('Czy chcesz używać własnej ochrony przed zamarzaniem (antifreeze) ?') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.antifreeze_customtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="antifreeze_custom_enable_hidden" value="" name="SETTINGS$antifreeze_custom_enable">
+                                            <input type="checkbox" class="form-check-input" id="antifreeze_custom_enable" aria-describedby="antifreeze_custom_enable">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="antifreeze_custom_settings" class="list-group-item disableddiv">
+                                <div class="row align-items-center mb-2">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.antifreeze_custom_outtemp">{{ _('Poniżej jakiej temp zewnętrznej') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" id="antifreeze_custom_outtemp" name="SETTINGS$antifreeze_custom_outtemp" step="0.1" value="">
+                                    </div>
+                                </div>
+                                <div class="row align-items-center mb-2">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.antifreeze_custom_twi">{{ _('Poniżej jakiej temp Twi') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" id="antifreeze_custom_twi" name="SETTINGS$antifreeze_custom_twi" step="0.1" value="">
+                                    </div>
+                                </div>
+                                <div class="row align-items-center mb-2">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.antifreeze_custom_two">{{ _('Poniżej jakiej temp Two') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" id="antifreeze_custom_two" name="SETTINGS$antifreeze_custom_two" step="0.1" value="">
+                                    </div>
+                                </div>
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.antifreeze_custom_runtime">{{ _('Czas pracy pompki (min)') }}</strong>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="number" class="form-control" id="antifreeze_custom_runtime_min" name="SETTINGS$antifreeze_custom_runtime_min" step="1" min="1" value="">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="list-group mb-4 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.chscheduler">{{ _('Używaj harmonogramu dla
+                                            C.O') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.chschedulertooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div
+                                            class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="chscheduler_hidden" value=""
+                                                name="SETTINGS$chscheduler">
+                                            <input type="checkbox" class="form-check-input" id="chscheduler"
+                                                aria-describedby="chscheduler">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!--<button type="submit" class="btn btn-primary" data-i18n="set.btn.save">{{ _('Zapisz ustawienia') }}</button>-->
+                        </div>
+
+                    </div>
+                    <div class="tab-pane fade" id="settings-ha-tab" role="tabpanel" aria-labelledby="settings-ha">
+                        <div class="list-group mb-3 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.haaddr">{{ _('Adres Home Assistant')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.haaddrtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="haaddr"
+                                                name="HOMEASSISTANT$HAADDR" aria-describedby="haaddr" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.haport">{{ _('Port Home Assistant')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.haporttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="haport"
+                                                name="HOMEASSISTANT$HAPORT" aria-describedby="haport" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.haapikey">{{ _('Klucz API Home Assistant')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.haapikeytooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="password" class="form-control" id="hakey"
+                                                name="HOMEASSISTANT$KEY" aria-describedby="hakey" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqttdiscovery">{{ _('Używaj "MQTT
+                                            Discovery"') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqttdiscoverytooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div
+                                            class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="ha_mqtt_discovery_hidden" value=""
+                                                name="HOMEASSISTANT$ha_mqtt_discovery">
+                                            <input type="checkbox" class="form-check-input" id="ha_mqtt_discovery"
+                                                value="1" {%if ha_mqtt_discovery=='1' %} checked {% endif %}>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.itentity">{{ _('Encja temperatury
+                                            wewnętrznej') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.itentitytooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="insidesensor"
+                                                name="HOMEASSISTANT$insidesensor" aria-describedby="insidesensor"
+                                                value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.otentity">{{ _('Encja temperatury
+                                            zewnętrznej') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.otentitytooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="outsidesensor"
+                                                name="HOMEASSISTANT$outsidesensor" aria-describedby="outsidesensor"
+                                                value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.ihentity">{{ _('Encja czujnika wilgotności')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.ihentitytooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="humiditysensor"
+                                                name="HOMEASSISTANT$humiditysensor" aria-describedby="humiditysensor"
+                                                value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!--<button type="submit" class="btn btn-primary" data-i18n="set.btn.save">{{ _('Zapisz ustawienia dla HA') }}</button>-->
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.dhwentity">DHW temperature entity</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.dhwentitytooltip"
+                                            data-bs-title="Enter the Home Assistant entity ID used to read DHW temperature.">
+                                        </i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="dhwsensor"
+                                                name="HOMEASSISTANT$dhwsensor" aria-describedby="dhwsensor" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                    <div class="tab-pane fade" id="settings-mqtt-tab" role="tabpanel"
+                        aria-labelledby="settings-mqtt">
+                        <div class="list-group mb-5 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqtt">{{ _('Protokół MQTT') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqtttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="hidden" id="use_mqtt_hidden" value="" name="MQTT$mqtt">
+                                            <input type="checkbox" class="form-check-input" id="use_mqtt" value="1" {%if
+                                                use_mqtt=='1' %} checked {% endif %}>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqttaddr">{{ _('Adres MQTT') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqttaddrtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="curol custom-switch">
+                                            <input type="text" class="form-control" id="mqtt_broker_addr"
+                                                name="MQTT$address" aria-describedby="mqtt_broker_addr" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqttport">{{ _('Port MQTT') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.datamqttporttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="mqtt_broker_port"
+                                                name="MQTT$port" aria-describedby="mqtt_broker_port" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqtttls">{{ _('Używaj MQTT z TLS')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqtttlstooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div
+                                            class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="mqtt_ssl" value="" name="MQTT$mqtt_ssl">
+                                            <input type="checkbox" class="form-check-input" id="mqtt_mqtt_ssl" value="1"
+                                                aria-describedby="mqtt_mqtt_ssl">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqtttopic">{{ _('Główny topic MQTT')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqtttopictooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="mqtt_topic"
+                                                name="MQTT$main_topic" aria-describedby="mqtt_topic" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqttuser">{{ _('Nazwa użytkownika')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqttusertooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="mqtt_username"
+                                                name="MQTT$username" aria-describedby="mqtt_username" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.mqttpass">{{ _('Hasło użytkownika')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.mqttpasstooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="password" class="form-control" id="mqtt_password"
+                                                name="MQTT$password" aria-describedby="mqtt_password" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!--<button type="submit" class="btn btn-primary" data-i18n="set.btn.save">{{ _('Zapisz ustawienia MQTT') }}</button>-->
+                        </div>
+                    </div>
+
+                    <div class="tab-pane fade" id="settings-hpiapp-tab" role="tabpanel"
+                        aria-labelledby="settings-hpiapp">
+                        <div class="list-group mb-5 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hpikey">Application Key</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hpikeytooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="password" class="form-control" id="hpikey" name="HPIAPP$hpikey"
+                                                aria-describedby="hpikey" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hpiconstart">Connect at startup</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hpicontroltooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div
+                                            class="custom-control custom-switch form-switch form-switch-lg text-center">
+                                            <input type="hidden" id="hpiatstart_hidden" value=""
+                                                name="HPIAPP$hpiatstart">
+                                            <input type="checkbox" class="form-check-input" id="hpiatstart"
+                                                aria-describedby="hpiatstart">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hpistatus">Connection status</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hpistatustooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control text-center" id="hpistatus" readonly value="Connected">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hpiconnsid">Connection session ID</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hpiconnsidtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control text-center" id="hpisid" readonly value="xxx">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hpicontrol">Control</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hpicontroltooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <button class="btn w-100" id='hpicontrol'
+                                                data-i18n="set.hpidisconnect">Disconnect</button>
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+
+                    <div class="tab-pane fade" id="settings-system-tab" role="tabpanel"
+                        aria-labelledby="settings-system">
+                        <div class="list-group mb-3 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.bindaddr">{{ _('Bind address') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.bindaddrtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="bindaddr"
+                                                name="MAIN$bindaddress" aria-describedby="bindaddr" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.bindport">{{ _('Bind port') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.bindporttooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="bindport" name="MAIN$bindport"
+                                                aria-describedby="bindport" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.serial">{{ _('Serial port') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.serialtooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="modbusdev" name="MAIN$modbusdev"
+                                                aria-describedby="modbusdev" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.modbusgpio">{{ _('Modbus GPIO') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.modbusgpiotooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="modbuspin" name="GPIO$modbus"
+                                                aria-describedby="modbuspin" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.flgpio">{{ _('Frequency limit GPIO')
+                                            }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.flgpiotooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="freqlimitpin"
+                                                name="GPIO$freqlimit" aria-describedby="freqlimitpin" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.hdgpio">{{ _('Heat demand GPIO') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.hdgpiotooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="heatdemandpin"
+                                                name="GPIO$heatdemand" aria-describedby="heatdemandpin" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.cdgpio">{{ _('Cool demand GPIO') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.cdgpiotooltip" data-bs-title="."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <div class="custom-control custom-switch">
+                                            <input type="text" class="form-control" id="cooldemandpin"
+                                                name="GPIO$cooldemand" aria-describedby="cooldemandpin" value="">
+                                            <span class="custom-control-label"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            </div>
+                        <div class="list-group mb-3 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.system_datetime">System date &amp;
+                                            time</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.system_datetime_tooltip"
+                                            data-bs-title="Current date and time from the controller (DietPi)."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <input type="text" id="system_datetime_value"
+                                            class="form-control form-control-sm text-center"
+                                            readonly value="">
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                        <div class="list-group mb-3 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.ui_font">UI font</strong
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.ui_font_tooltip"
+                                            data-bs-title="Select the UI font family. Inter and Roboto are loaded from Google Fonts (if available). System uses your device default font."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <select class="form-select form-select-sm text-center" id="ui_font"
+                                            name="MAIN$ui_font" aria-describedby="ui_font">
+                                            <option value="inter">Inter</option>
+                                            <option value="roboto">Roboto</option>
+                                            <option value="system">System default</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="list-group mb-5 shadow">
+                            <div class="list-group-item">
+                                <div class="row align-items-center">
+                                    <div class="col">
+                                        <strong class="mb-0" data-i18n="set.loglevel">{{ _('Log level') }}</strong>
+                                        <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" data-bs-html="true"
+                                            data-i18n="[data-bs-title]set.logleveltooltip"
+                                            data-bs-title="Logging verbosity for HaierPi (DEBUG, INFO, WARNING, ERROR)."></i>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <select class="form-select form-select-sm text-center" id="log_level"
+                                            name="MAIN$log_level" aria-describedby="log_level">
+                                            <option value="DEBUG">DEBUG</option>
+                                            <option value="INFO" selected>INFO</option>
+                                            <option value="WARNING">WARNING</option>
+                                            <option value="ERROR">ERROR</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!--<button type="submit" class="btn btn-primary" data-i18n="set.btn.save">{{ _('Save') }}</button>-->
+                    </div>
+                <!--                <div class="tab-pane fade" id="settings-logs-tab" role="tabpanel" aria-labelledby="settings-logs-tab">
+                    <div class="list-group mb-5 sha                    <div class="list-group-item">
+                        <div class="row align-items-center" id="journal">
+
+			</div>
+                        <script>
+        var journalDiv = document.getElementById('journal');
+				var eventSource = new EventSource(window.location.origin+":5000/stream");
+
+        eventSource.onmessage = function(event) {
+            var line = document.createElement('p');
+            line.className = 'journal-entry';
+            line.innerHTML = event.data;
+            journalDiv.appendChild(line);
+
+            setTimeout(function() {
+                line.classList.add('fadeout');
+            }, 2000);
+        };
+    </script>
+
+			    </div><div class="btn-group" role="group"><button id="startlogbutton" onclick="start_log('restart');" class="btn btn-outline-primary">{{ _('Start logging') }}</button><button onclick="download_log();" class="btn btn-outline-primary">{{ _('Save to file') }}</button> </div>
+                    </div>
+</div>
+
+	    </div>-->
+                <div class="tab-pane fade" id="settings-service-tab" role="tabpanel"
+                    aria-labelledby="settings-service">
+
+                    <div class="list-group mb-4 shadow">
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.tempcomp">Kompensacja CO</strong>
+                                    <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                        data-bs-placement="bottom" data-bs-html="true"
+                                        data-i18n="[data-bs-title]set.tempcomptooltip"
+                                        data-bs-title="Temperature compensation (A03). You can read current value and set it in range -15…15 by 0.5"></i>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="input-group">
+                                        <button class="btn btn-outline-secondary" type="button"
+                                            id="tempcomp_minus">-</button>
+                                        <input type="text" class="form-control form-control-sm text-center"
+                                            id="tempcompensation_set" value="0.0" readonly>
+                                        <button class="btn btn-outline-secondary" type="button"
+                                            id="tempcomp_plus">+</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.dhwtempcomp">Kompensacja CWU</strong>
+                                    <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                        data-bs-placement="bottom" data-bs-html="true"
+                                        data-i18n="[data-bs-title]set.dhwtempcomptooltip"
+                                        data-bs-title="DHW temperature compensation (A0d). You can read current value and set it in range -15…15 by 0.5"></i>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="input-group">
+                                        <button class="btn btn-outline-secondary" type="button"
+                                            id="dhwtempcomp_minus">-</button>
+                                        <input type="text" class="form-control form-control-sm text-center"
+                                            id="dhwcompensation_set" value="0.0" readonly>
+                                        <button class="btn btn-outline-secondary" type="button"
+                                            id="dhwtempcomp_plus">+</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <div class="list-group mb-4 shadow">
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.service_test">Test elementów wykonawczych</strong>
+                                    <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                        data-bs-placement="bottom" data-bs-html="true"
+                                        data-i18n="[data-bs-title]set.service_test_tooltip"
+                                        data-bs-title="You can force Pump or Heater only when Pump=off, Heater=off, compressor is stopped and heat demand=0. The test will end automatically and switch back to off."></i>
+                                    <!-- status moved to the availability box on the right -->
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="text" class="form-control form-control-sm text-center"
+                                        id="service_test_available" value="N.A" readonly>
+                                </div>
+                            </div>
+                        </div>
+
+                        
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.service_test_duration">Czas testu (min)</strong>
+                                    <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                        data-bs-placement="bottom" data-bs-html="true"
+                                        data-i18n="[data-bs-title]set.service_test_duration_tooltip"
+                                        data-bs-title="Auto-off duration (minutes) for Pump/Heater service tests."></i>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="number" class="form-control form-control-sm text-center"
+                                        id="service_test_duration_min" min="0.5" max="240" step="0.5" inputmode="decimal">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.service_test_pump">Set Pump (A05)</strong>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="form-check form-switch form-switch-lg d-flex justify-content-end">
+                                        <input class="form-check-input" type="checkbox" id="service_set_pump">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.service_test_heater">Set Heater (A04)</strong>
+                                    <i class="bi bi-info-circle ms-2 text-accent3" data-bs-toggle="tooltip"
+                                        data-bs-placement="bottom" data-bs-html="true"
+                                        data-i18n="[data-bs-title]set.service_test_heater_tooltip"
+                                        data-bs-title="During heater test, the circulation pump is also started to protect against overheating."></i>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="form-check form-switch form-switch-lg d-flex justify-content-end">
+                                        <input class="form-check-input" type="checkbox" id="service_set_heater">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <div class="list-group mb-4 shadow">
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.error">Error - Aktywny błąd jednostki</strong>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="text" class="form-control form-control-sm text-center"
+                                        id="service_error" value="N.A" readonly>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.lasterror">LastError - Potwierdzony błąd
+                                        jednostki</strong>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="text" class="form-control form-control-sm text-center"
+                                        id="service_lasterror" value="N.A" readonly>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.archerror">Archerror - Ostatnio zapisane
+                                        błędy</strong>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="text" class="form-control form-control-sm text-center"
+                                        id="service_archerror" value="N.A" readonly>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="list-group mb-4 shadow">
+
+                        <div class="list-group-item">
+                            <div class="row align-items-center">
+                                <div class="col">
+                                    <strong class="mb-0" data-i18n="set.firmware">Wersja oprogramowania</strong>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="text" class="form-control form-control-sm text-center"
+                                        id="service_firmware" value="N.A" readonly>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div>
+
+                </div>
+            </form>
+        </div>
+        <div class="row align-items-center mb-4" id="saveRow">
+            <div class="col"><button class="btn btn-outline-secondary w-100" id="saveButton"
+                    data-i18n="set.btn.save"></button></div>
+        </div>
+    </div>
+</div>
+
+</div>
+{% endblock %}
+{% block end_scripts %}
+
+<!-- SETTINGS-ONLY: tooltip refresh after i18n (bez ruszania base/index) -->
+<script>
+    (function () {
+        function refreshTooltipsBs5(root) {
+            if (!window.bootstrap || !bootstrap.Tooltip) return;
+            root = root || document;
+            root.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function (el) {
+                try {
+                    var inst = bootstrap.Tooltip.getInstance(el);
+                    if (inst) inst.dispose();
+                    new bootstrap.Tooltip(el);
+                } catch (e) {
+                    // nic
+                }
+            });
+        }
+
+        function run() {
+            var root = document.getElementById('settingsForm') || document;
+            refreshTooltipsBs5(root);
+        }
+
+        // 1) Po wczytaniu strony (i18next zwykle kończy init chwilę później)
+        window.addEventListener('load', function () {
+            setTimeout(run, 50);
+            setTimeout(run, 400);
+            setTimeout(run, 1200);
+        });
+
+        // 2) Po zmianie zakładki (tooltips w ukrytych tabach też mają się odświeżyć)
+        document.addEventListener('shown.bs.tab', function () {
+            setTimeout(run, 0);
+        });
+
+        // 3) Jeśli i18next jest dostępny, odśwież po init i po zmianie języka
+        function attachI18nHooks() {
+            if (!window.i18next || typeof i18next.on !== 'function') return false;
+            i18next.on('initialized', function () { setTimeout(run, 0); });
+            i18next.on('languageChanged', function () { setTimeout(run, 0); });
+            return true;
+        }
+
+        if (!attachI18nHooks()) {
+            // jeśli i18next ładuje się później, spróbuj przez chwilę dociągnąć hooki
+            var tries = 0;
+            var timer = setInterval(function () {
+                tries += 1;
+                if (attachI18nHooks() || tries > 100) clearInterval(timer); // ~5s
+            }, 50);
+        }
+    })();
+</script>
+
+<script>
+    // Funkcja do usuwania klas z danym prefiksem (zostawiłem, jest przydatna)
+    function removeClassesByPrefix(selector, prefix) {
+        $(selector).removeClass(function (index, className) {
+            return (className.match(new RegExp('\\b' + prefix + '\\S+', 'g')) || []).join(' ');
+        });
+    }
+
+    // Prosty helper do tłumaczeń dynamicznych (statusy/przyciski)
+    function t(key, fallback) {
+        try {
+            if (window.i18next && typeof i18next.t === 'function') {
+                const v = i18next.t(key);
+                if (v && v !== key) return v;
+            }
+        } catch (e) { }
+        return (fallback !== undefined) ? fallback : key;
+    }
+
+
+    // Ustaw tekst w elemencie: wspiera <input> (value) i zwykłe elementy (textContent)
+    function setTextValue(selector, value) {
+        const $el = $(selector);
+        if (!$el.length) return;
+        if ($el.is('input,textarea')) {
+            $el.val(value);
+        } else {
+            $el.text(value);
+        }
+    }
+
+    // Całą logikę umieszczamy wewnątrz $(document).ready(), aby mieć pewność, że DOM jest załadowany.
+    $(document).ready(function () {
+
+        // ########### LOGIKA UI (refaktoryzacja) ###########
+
+        function updateAntiOnOffView() {
+            const isChecked = $("#antionoff").is(":checked");
+            // blok z ustawieniami delty aktywny tylko gdy Anty ON-OFF jest włączone
+            $("#antionoffsettings").toggleClass("disableddiv", !isChecked);
+
+            // parametry zależne od temperatury mają być wyszarzone, gdy Anty ON-OFF jest włączone
+            $("#divflimittemp, #divpresetchange, #divpresetquiet, #divpresetturbo").toggleClass("disableddiv", isChecked);
+
+            // po zmianie Anty ON-OFF odśwież widoczność bloków zależnych (żeby nie zostawały puste ramki)
+            updatePresetDependency();
+        }
+
+
+        function updateThermostatDependencies() {
+            const on = $("#thermostat_on").is(":checked");
+            // Histerezy aktywne tylko gdy termostat włączony
+            $("#div_lohysteresis, #div_hihysteresis").toggleClass("disableddiv", !on);
+
+            // W trybie bezpośrednim zadana temp wewnątrz ma sens tylko gdy sterowanie termostatem jest włączone.
+            // Gdy termostat OFF – ukryj całą sekcję, żeby nie mieszała w UI.
+            $("#direct_inside_section").toggleClass("hidden", !on);
+        }
+
+
+        // Thermostat hysteresis inputs: keep one decimal place (0 -> 0.0) and auto-save on change
+        function formatOneDecimal(v) {
+            let n = Number(String(v ?? '').trim().replace(',', '.'));
+            if (!Number.isFinite(n)) n = 0;
+            return n.toFixed(1);
+        }
+
+        function emitSingleSetting(name, value) {
+            try {
+                if (!socket || !socket.connected) return;
+                const formData = { settings: {} };
+                formData.settings[name] = value;
+                socket.emit('client', formData);
+            } catch (e) { }
+        }
+
+        (function bindThermostatHysteresisAutosave() {
+            const $lo = $('#lohysteresis');
+            const $hi = $('#hihysteresis');
+            if (!$lo.length || !$hi.length) return;
+
+            let tmrLo = null;
+            let tmrHi = null;
+
+            function scheduleLo() {
+                if ($lo.is(':disabled') || $lo.closest('.disableddiv').length) return;
+                if (tmrLo) clearTimeout(tmrLo);
+                tmrLo = setTimeout(function () {
+                    const v = formatOneDecimal($lo.val());
+                    $lo.val(v);
+                    emitSingleSetting('SETTINGS$lohysteresis', v);
+                    appendAlert(t('set.thermostat_hysteresis_saved', 'Thermostat hysteresis saved'), 'success');
+                }, 250);
+            }
+
+            function scheduleHi() {
+                if ($hi.is(':disabled') || $hi.closest('.disableddiv').length) return;
+                if (tmrHi) clearTimeout(tmrHi);
+                tmrHi = setTimeout(function () {
+                    const v = formatOneDecimal($hi.val());
+                    $hi.val(v);
+                    emitSingleSetting('SETTINGS$hihysteresis', v);
+                    appendAlert(t('set.thermostat_hysteresis_saved', 'Thermostat hysteresis saved'), 'success');
+                }, 250);
+            }
+
+            // Works for spinner arrows and manual typing
+            $lo.on('input change', scheduleLo);
+            $hi.on('input change', scheduleHi);
+
+            // Normalize on blur too (visual consistency)
+            $lo.on('blur', function () { $lo.val(formatOneDecimal($lo.val())); });
+            $hi.on('blur', function () { $hi.val(formatOneDecimal($hi.val())); });
+        })();
+
+
+
+
+        // Sterowanie ogrzewaniem: Krzywa grzewcza vs Bezpośrednio
+
+        // --- Pamiętanie ostatniego typu krzywej (auto/static/manual) ---
+        const LAST_CURVE_LS_KEY = 'hpi_last_curve_type';
+        let lastCurveType = null;
+
+        function isValidCurveType(v) {
+            return v === 'auto' || v === 'static' || v === 'manual';
+        }
+
+        function getCurveTypeFromConfigHidden() {
+            const v = String($("#heatingcurve_hidden").val() || '').toLowerCase().trim();
+            return isValidCurveType(v) ? v : null;
+        }
+
+        function loadLastCurveType() {
+            // 1) pamięć runtime (np. po przełączeniach w tej sesji)
+            if (isValidCurveType(lastCurveType)) return lastCurveType;
+
+            // 2) localStorage (jeśli było wcześniej ustawione)
+            try {
+                const ls = String(localStorage.getItem(LAST_CURVE_LS_KEY) || '').toLowerCase().trim();
+                if (isValidCurveType(ls)) return ls;
+            } catch (e) { }
+
+            // 3) ostatecznie
+            return 'auto';
+        }
+
+        function saveLastCurveType(v) {
+            if (!isValidCurveType(v)) return;
+            lastCurveType = v;
+            try { localStorage.setItem(LAST_CURVE_LS_KEY, v); } catch (e) { }
+        }
+        function getEffectiveHeatingCurveMode() {
+            const ctrl = $("#heatingcontrol").val();
+            if (ctrl === 'direct') return 'directly';
+            return $("#heatingcurve").val();
+        }
+
+        function applyHeatingCurveFromHidden() {
+            const v = String($("#heatingcurve_hidden").val() || '').toLowerCase().trim();
+
+            if (v === 'directly' || v === 'direct') {
+                // Tryb Bezpośrednio: hidden trzyma "directly", ale typ krzywej ma pozostać ostatnio wybrany
+                $("#heatingcontrol").val('direct');
+                const remembered = loadLastCurveType();
+                $("#heatingcurve").val(remembered);
+            } else if (isValidCurveType(v)) {
+                // Tryb Krzywa: hidden = auto/static/manual
+                $("#heatingcontrol").val('curve');
+                $("#heatingcurve").val(v);
+                saveLastCurveType(v);
+            } else {
+                // Fallback
+                $("#heatingcontrol").val('curve');
+                const remembered = loadLastCurveType();
+                $("#heatingcurve").val(remembered);
+                saveLastCurveType(remembered);
+            }
+        }
+
+        function syncHeatingCurveHidden() {
+            const effective = getEffectiveHeatingCurveMode();
+            $("#heatingcurve_hidden").val(effective);
+        }
+
+        function updateHeatingControlView() {
+            const isDirect = $("#heatingcontrol").val() === 'direct';
+            $("#heatingcurve_section").toggleClass('disableddiv', isDirect);
+
+            // Wyszarz tylko ustawienie "Zadana temperatura wewnątrz w trybie bezpośrednim"
+            $("#direct_inside_section").toggleClass('disableddiv', !isDirect);
+
+            // Termostat jest globalny (krzywa + bezpośrednio) – nie wyszarzamy go trybem sterowania
+            syncHeatingCurveHidden();
+        }
+
+        function updateHeatingCurveView() {
+            const selectedCurve = getEffectiveHeatingCurveMode();
+            const divVisibility = {
+                auto: { slope: true, pshift: true, hcamp: true, manual: false },
+                static: { slope: true, pshift: false, hcamp: false, manual: false },
+                manual: { slope: false, pshift: false, hcamp: false, manual: true },
+                directly: { slope: false, pshift: false, hcamp: false, manual: false }
+            };
+
+            const config = divVisibility[selectedCurve] || divVisibility.directly; // Domyślna wartość
+
+            $("#divslope").toggleClass("disableddiv", !config.slope);
+            $("#divpshift").toggleClass("disableddiv", !config.pshift);
+            $("#divhcamp").toggleClass("disableddiv", !config.hcamp);
+            $("#divhcmanual").toggleClass("disableddiv", !config.manual);
+        }
+
+        function updatePresetDependency() {
+            const presetMode = $('[name="SETTINGS$presetautochange"]').val();
+            const isPresetManual = (presetMode === 'manual');
+
+            // Jeśli Zmiana trybu = Manual i Anty ON-OFF jest włączone, wyłącz je (niekompatybilne)
+            const antionoffCheckbox = $("#antionoff");
+            if (isPresetManual && antionoffCheckbox.is(":checked")) {
+                antionoffCheckbox.prop("checked", false).trigger("change");
+            }
+
+            // Ukryj całą "tabelkę" z progami dla FLimit / Quiet / Turbo, gdy Zmiana trybu = Manual
+            // oraz gdy w danym momencie wszystkie trzy wiersze są nieaktywne (disableddiv),
+            // żeby nie zostawało puste pole na stronie.
+            const hideByDisabled = $("#divflimittemp").hasClass("disableddiv")
+                && $("#divpresetquiet").hasClass("disableddiv")
+                && $("#divpresetturbo").hasClass("disableddiv");
+
+            $("#presettemps_section").toggleClass("hidden", isPresetManual || hideByDisabled);
+        }
+
+        function updateZoneViews() {
+            const frostOn = $("#zone_frost_enable").is(":checked");
+            $("#zone_frost_settings").toggleClass("disableddiv", !frostOn);
+
+            const warmOn = $("#zone_warm_enable").is(":checked");
+            $("#zone_warm_settings").toggleClass("disableddiv", !warmOn);
+        }
+
+
+function updateAntifreezeCustomView() {
+    const on = $("#antifreeze_custom_enable").is(":checked");
+    $("#antifreeze_custom_settings").toggleClass("disableddiv", !on);
+}
+
+        function updateDhwViews() {
+            const DhwON = $("#dhwuse").is(":checked");
+            $("#dhw_dependent").toggleClass("disableddiv", !DhwON);
+        }
+
+        function updateDhwModeViews() {
+            const DhwModeON = $("#dhwwl").is(":checked");
+            $("#dhw_mode_settings").toggleClass("disableddiv", !DhwModeON);
+
+        }
+
+        // NOWA FUNKCJA DLA ZALEŻNOŚCI HOME ASSISTANT
+        function updateHaDependencies() {
+            // Krok 1: Sprawdzenie ogólnej konfiguracji HA (Warunek Główny)
+            const haAddr = $('[name="HOMEASSISTANT$HAADDR"]').val().trim();
+            const haPort = $('[name="HOMEASSISTANT$HAPORT"]').val().trim();
+            const haKey = $('[name="HOMEASSISTANT$KEY"]').val().trim();
+            const isHaCoreConfigured = haAddr !== '' && haPort !== '' && haKey !== '';
+
+            // Krok 2: Sprawdzenie każdego selecta z osobna
+
+            // 2a. Czujnik temperatury wewnętrznej
+            const insideSensorEntity = $('[name="HOMEASSISTANT$insidesensor"]').val().trim();
+            const canUseHaForInsideTemp = isHaCoreConfigured && insideSensorEntity !== '';
+            $('[name="SETTINGS$insidetemp"] option[value="ha"]').prop('disabled', !canUseHaForInsideTemp);
+
+            // 2b. Czujnik temperatury zewnętrznej
+            const outsideSensorEntity = $('[name="HOMEASSISTANT$outsidesensor"]').val().trim();
+            const canUseHaForOutsideTemp = isHaCoreConfigured && outsideSensorEntity !== '';
+            $('[name="SETTINGS$outsidetemp"] option[value="ha"]').prop('disabled', !canUseHaForOutsideTemp);
+
+            // 2c. Czujnik wilgotności
+            const humiditySensorEntity = $('[name="HOMEASSISTANT$humiditysensor"]').val().trim();
+            const canUseHaForHumidity = isHaCoreConfigured && humiditySensorEntity !== '';
+            $('[name="SETTINGS$humidity"] option[value="ha"]').prop('disabled', !canUseHaForHumidity);
+
+            // 2d. Czujnik temperatury CWU (DHW)
+            const dhwSensorEntity = $('[name="HOMEASSISTANT$dhwsensor"]').val().trim();
+            const canUseHaForDhwTemp = isHaCoreConfigured && dhwSensorEntity !== '';
+            const $dhwTempSelect = $('[name="SETTINGS$dhwtemp"]');
+            $dhwTempSelect.find('option[value="ha"]').prop('disabled', !canUseHaForDhwTemp);
+            // Jeżeli użytkownik miał wybrane HA, a brakuje encji / konfiguracji — wracamy do wbudowanego
+            if (!canUseHaForDhwTemp && ($dhwTempSelect.val() || '').toLowerCase() === 'ha') {
+                $dhwTempSelect.val('builtin');
+            }
+        }
+
+        function assembleManualHeatingCurve() {
+            const values = $("#hcmantable input[type='number']").map(function () {
+                return $(this).val();
+            }).get();
+            $('#hcman').val(values.join(','));
+        }
+
+        // Init state from server-rendered hidden value
+        applyHeatingCurveFromHidden();
+        updateHeatingControlView();
+        updateHeatingCurveView();
+        updateThermostatDependencies();
+
+        // ########### POWIĄZANIA ZDARZEŃ (unobtrusive JS) ###########
+
+        // Zdarzenia dla checkboxów z ukrytym inputem
+        // To jest ogólna obsługa, która zadziała dla każdego checkboxa, który ma tuż przed sobą ukryty input
+        $('input[type="checkbox"]').on('change', function () {
+            const hiddenInput = $(this).prev('input[type="hidden"]');
+            if (hiddenInput.length) {
+                hiddenInput.val($(this).is(':checked') ? '1' : '0');
+            }
+        });
+
+        // Powiązania dla specyficznych kontrolek UI
+        $("#antionoff").on('change', updateAntiOnOffView);
+        $("#thermostat_on").on('change', updateThermostatDependencies);
+        $("#heatingcontrol").on('change', function () {
+            const isDirect = $("#heatingcontrol").val() === 'direct';
+
+            if (isDirect) {
+                // przechodzimy na Bezpośrednio: zapamiętaj ostatni typ krzywej
+                const cur = String($("#heatingcurve").val() || '').toLowerCase().trim();
+                if (isValidCurveType(cur)) saveLastCurveType(cur);
+            } else {
+                // wracamy na Krzywą: przywróć ostatnio wybrany typ (z configu lub pamięci)
+                const fromConfig = getCurveTypeFromConfigHidden();
+                const remembered = fromConfig || loadLastCurveType();
+                $("#heatingcurve").val(remembered);
+                saveLastCurveType(remembered);
+            }
+
+            updateHeatingControlView();
+            updateHeatingCurveView();
+        });
+        $("#heatingcurve").on('change', function () {
+            const cur = String($("#heatingcurve").val() || '').toLowerCase().trim();
+            if (isValidCurveType(cur)) saveLastCurveType(cur);
+            syncHeatingCurveHidden();
+            updateHeatingCurveView();
+        });
+        $("#zone_frost_enable, #zone_warm_enable").on('change', updateZoneViews);
+        $("#antifreeze_custom_enable").on('change', updateAntifreezeCustomView);
+        $("#dhwwl").on('change', updateDhwModeViews);
+        $("#dhwuse").on('change', updateDhwViews);
+        $("#hcmantable input[type='number']").on('change', assembleManualHeatingCurve);
+
+
+
+        // UI font preview (applies instantly without reload)
+        const UI_FONT_HREF = {
+            inter: 'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap',
+            roboto: 'https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap',
+        };
+
+        function ensureUiFontStylesheet(fontKey) {
+            try {
+                const href = UI_FONT_HREF[fontKey];
+                const existing = document.getElementById('ui-font-link');
+                const fontCssLink = document.querySelector('link[href*="/static/font.css"], link[href*="font.css"]');
+
+                if (!href) {
+                    if (existing) existing.remove();
+                    return;
+                }
+
+                let link = existing;
+                if (!link) {
+                    link = document.createElement('link');
+                    link.id = 'ui-font-link';
+                    link.rel = 'stylesheet';
+                    if (fontCssLink && fontCssLink.parentNode) {
+                        fontCssLink.parentNode.insertBefore(link, fontCssLink);
+                    } else {
+                        document.head.appendChild(link);
+                    }
+                }
+
+                if (link.getAttribute('href') !== href) link.setAttribute('href', href);
+            } catch (e) {}
+        }
+
+        function applyUiFontFromSelect() {
+            try {
+                const $sel = $("#ui_font");
+                if (!$sel.length) return;
+                const v = String($sel.val() || '').trim().toLowerCase();
+                if (!v) return;
+                ensureUiFontStylesheet(v);
+                document.documentElement.setAttribute('data-ui-font', v);
+            } catch (e) {}
+        }
+
+        $("#ui_font").on('change', applyUiFontFromSelect);
+
+        applyUiFontFromSelect();
+        // Zdarzenia dla wykresu
+        $("#tempRange, #slope, #pshift, #hcamp").on('input change', recalc);
+        $('[name="SETTINGS$presetautochange"]').on('change', function () {
+            const selectedMode = $(this).val();
+            const antionoffCheckbox = $('#antionoff');
+
+            // Sprawdzamy, czy użytkownik włącza tryb 'manual', a opcja 'antionoff' jest aktywna
+            if (selectedMode === 'manual' && antionoffCheckbox.is(':checked')) {
+                // Wyświetlamy ostrzeżenie
+                appendAlert('Opcja "Anty ON-OFF" zostanie wyłączona, ponieważ jest niekompatybilna z ręczną zmianą trybu.', 'warning');
+            }
+
+            // Niezależnie od alertu, zawsze aktualizujemy stan UI
+            updatePresetDependency();
+        });
+
+        $('[name^="HOMEASSISTANT$"]').on('input', updateHaDependencies);
+
+
+        // ########### LOGIKA WEBSOCKET ###########
+
+        const socket = io();
+
+        // Do not rely on the websocket Referer header on the backend.
+        // Explicitly ask for the full settings payload on connect so fields always fill after reboot/restart.
+        socket.on('connect', function () {
+            socket.emit('client', { get_settings: 1 });
+            // Service tab: ask for immediate snapshot so fields fill instantly (no waiting for next periodic push)
+            try {
+                if (typeof __isServiceTabActive === 'function' && __isServiceTabActive()) {
+                    socket.emit('client', { get_service: 1 });
+                }
+            } catch (e) {}
+        });
+
+        socket.on('settings', function (data) {
+            // Backend może wysłać ustawienia bezpośrednio (np. {"SETTINGS$...": ...})
+            // albo opakowane (np. {"settings": {"SETTINGS$...": ...}})
+            const payload = (data && typeof data === 'object' && data.settings && typeof data.settings === 'object') ? data.settings : data;
+            console.log("Otrzymano ustawienia:", payload);
+
+            // Wypełnianie formularza
+            for (let key in payload) {
+                const element = $(`[name="${key}"]`);
+                if (!element.length) continue;
+
+                // Obsługa checkboxów
+                if (element.attr('type') === 'hidden' && element.next().attr('type') === 'checkbox') {
+                    const isChecked = parseInt(payload[key]) === 1;
+                    element.val(isChecked ? '1' : '0');
+                    element.next().prop('checked', isChecked);
+                }
+                // Obsługa ręcznej krzywej
+                else if (key === 'SETTINGS$hcman' && Array.isArray(payload[key])) {
+                    element.val(payload[key].join(','));
+                    const hcmanValues = payload[key];
+                    $("#hcmantable input[type='number']").each(function (index) {
+                        if (index < hcmanValues.length) {
+                            $(this).val(hcmanValues[index]);
+                        }
+                    });
+                }
+                // Pozostałe pola (text, select, number)
+                else {
+                    // input[type=number] bywa "surowy" – spacje/CR czy przecinek dziesiętny mogą zostać odrzucone
+                    // (i wtedy pole zostaje puste po restarcie). Normalizujemy wartości.
+                    let v = payload[key];
+                    if (element.attr('type') === 'number') {
+                        // Normalize number values coming from config/runtime.
+                        // Some configs may include inline comments (e.g. "0.1 ; comment") or locale commas.
+                        // Keep only the leading numeric token so <input type=number> doesn't reject it.
+                        const raw = String(v ?? '').trim().replace(',', '.');
+                        const m = raw.match(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
+                        v = m ? m[0] : '';
+                    }
+
+                    // Keep thermostat hysteresis visually consistent: always 1 decimal (0 -> 0.0)
+                    if (key === 'SETTINGS$lohysteresis' || key === 'SETTINGS$hihysteresis') {
+                        v = formatOneDecimal(v);
+                    }
+                    element.val(v);
+                }
+            }
+
+            // --- KLUCZOWA CZĘŚĆ ---
+            // Po wypełnieniu wszystkich pól, ręcznie wywołujemy funkcje aktualizujące UI
+            console.log("Aktualizowanie widoku UI po załadowaniu danych...");
+            applyHeatingCurveFromHidden();
+            updateHeatingControlView();
+            updateThermostatDependencies();
+            updateAntiOnOffView();
+            updateHeatingCurveView();
+            updatePresetDependency();
+            updateHaDependencies();
+            updateZoneViews();
+            updateAntifreezeCustomView();
+            updateDhwModeViews();
+            updateDhwViews();
+            applyUiFontFromSelect();
+            recalc(); // Aby wykres odświeżył się z załadowanymi danymi
+
+            // Logika dla statusu połączenia HPI (pozostawiona bez zmian)
+            if ('hpiconn' in payload) {
+                switch (payload['hpiconn']) {
+                    case 'N.A.': {
+                        const unk = t('set.hpiunknown', 'Unknown');
+                        setTextValue('#hpistatus', unk);
+                        $('#hpistatus').removeClass('text-success text-danger text-warning');
+                        $('#hpistatus')[0].classList.add('text-warning');
+                        setTextValue('#hpisid', unk);
+                        $("#hpicontrol")[0].classList.add('btn-outline-warning');
+                        $("#hpicontrol")[0].classList.add('disabled');
+                        $("#hpicontrol").text(unk);
+                        break;
+                    }
+                    case null: {
+                        const disconnected = t('set.hpidisconnected', 'Disconnected');
+                        const unk = t('set.hpiunknown', 'Unknown');
+                        const connect = t('set.hpiconnect', 'Connect');
+                        $('#hpistatus').removeClass('text-success text-danger text-warning');
+                        removeClassesByPrefix('#hpicontrol', 'btn-outline-');
+                        setTextValue('#hpistatus', disconnected);
+                        $('#hpistatus')[0].classList.add('text-danger');
+                        setTextValue('#hpisid', unk);
+                        $("#hpicontrol")[0].classList.remove('disabled');
+                        $("#hpicontrol")[0].classList.add('btn-outline-success');
+                        $("#hpicontrol").text(connect);
+                        break;
+                    }
+                    case false: {
+                        const disconnected = t('set.hpidisconnected', 'Disconnected');
+                        const unk = t('set.hpiunknown', 'Unknown');
+                        const connect = t('set.hpiconnect', 'Connect');
+                        $('#hpistatus').removeClass('text-success text-danger text-warning');
+                        removeClassesByPrefix('#hpicontrol', 'btn-outline-');
+                        setTextValue('#hpistatus', disconnected);
+                        $('#hpistatus')[0].classList.add('text-danger');
+                        setTextValue('#hpisid', unk);
+                        $("#hpicontrol")[0].classList.remove('disabled');
+                        $("#hpicontrol")[0].classList.add('btn-outline-success');
+                        $("#hpicontrol").text(connect);
+                        $("#hpicontrol")[0].classList.add('disabled');
+                        break;
+                    }
+                    default: {
+                        const connected = t('set.hpiconnected', 'Connected');
+                        const disconnect = t('set.hpidisconnect', 'Disconnect');
+                        $('#hpistatus').removeClass('text-success text-danger text-warning');
+                        removeClassesByPrefix('#hpicontrol', 'btn-outline-');
+                        setTextValue('#hpistatus', connected);
+                        setTextValue('#hpisid', payload['hpiconn']);
+                        $('#hpistatus')[0].classList.add('text-success');
+                        $("#hpicontrol")[0].classList.remove('disabled');
+                        $("#hpicontrol")[0].classList.add('btn-outline-danger');
+                        $("#hpicontrol").text(disconnect);
+                    }
+                }
+            }
+        });
+
+        socket.on('return', function (msg) {
+            // Standardowe komunikaty (np. zapis ustawień)
+            if (msg.info && msg.status) {
+                let info = msg.info;
+                const st = msg.status;
+
+                // Backend często zwraca tylko "ok" – mapujemy na sensowniejsze komunikaty zależnie od ostatniej akcji użytkownika
+                try {
+                    if (typeof info === 'string' && info.trim().toLowerCase() === 'ok' && ['success','info'].includes(String(st).toLowerCase())) {
+                        const ctx = window.__lastOkContext;
+                        const map = {
+                            settings_save: 'toast.settings_saved',
+                            service_pump_on: 'toast.pump_test_on',
+                            service_pump_off: 'toast.pump_test_off',
+                            service_heater_on: 'toast.heater_test_on',
+                            service_heater_off: 'toast.heater_test_off',
+                        };
+                        info = (ctx && map[ctx]) ? map[ctx] : 'toast.ok';
+                        window.__lastOkContext = null;
+                    }
+                } catch (e) { /* ignore */ }
+
+                appendAlert(info, st);
+            }
+            // Komunikaty z wysyłki zadanych (CO/CWU) – to jest to co wcześniej dawało toast "Centralne Ogrzewanie"
+            if (msg.tempchange && msg.type) {
+                appendAlert(msg.tempchange, msg.type);
+            }
+            // Wynik ręcznego przeliczenia krzywej
+            if (msg.curvecalc) {
+                appendAlert(msg.curvecalc, 'success');
+            }
+            // Zmiany stanów (pch/pdhw/off/...) – pokaż status jeśli backend zwrócił string
+            if (msg.statechange && msg.status && typeof msg.status === 'string') {
+                appendAlert(msg.status, 'success');
+            }
+            console.log("Odpowiedź z serwera:", msg);
+        });
+
+        // Przycisk zapisu
+        $("#saveButton").on("click", function (event) {
+            event.preventDefault();
+            if (!socket.connected) {
+                console.warn("Socket nie jest połączony!");
+                appendAlert("Brak połączenia z serwerem!", "danger");
+                return;
+            }
+
+            let formData = { settings: {} };
+            $("#settingsForm").find("select, input").each(function () {
+                if (this.name) {
+                    formData.settings[this.name] = $(this).val();
+                }
+            });
+
+            isFormDirty = false; // Resetujemy flagę po wysłaniu
+            window.__lastOkContext = 'settings_save';
+            socket.emit("client", formData);
+            console.log("Wysłano ustawienia:", formData);
+        });
+
+        // Logika HPI App (pozostawiona bez zmian)
+        $('#hpicontrol').click(function () {
+            const command = $(this).text().toLowerCase();
+            socket.emit('client', { hpiapp: command });
+        });
+
+        // ########### SERVICE TAB (Temp compensation + errors) ###########
+        function svcToNumber(v) {
+            if (v === null || v === undefined) return null;
+            const s = String(v).trim().replace("°C", "").replace(",", ".");
+            if (!s || s.toUpperCase() === "N.A" || s.toLowerCase() === "nan") return null;
+            const n = Number(s);
+            return Number.isFinite(n) ? n : null;
+        }
+
+        // Show as delta vs 0.0, with sign for non-zero values
+        function svcFmtDelta(v) {
+            const n = svcToNumber(v);
+            if (n === null) return "0.0";
+            const r = Math.round(n * 2) / 2; // keep 0.5 steps in UI
+            const s = r.toFixed(1);
+            if (Math.abs(r) < 0.05) return "0.0";
+            return (r > 0 ? "+" : "") + s;
+        }
+        function svcFmtPlain(v) {
+            if (v === null || v === undefined) return "N.A";
+            const s = String(v).trim();
+            if (!s || s.toUpperCase() === "N.A" || s.toLowerCase() === "nan") return "N.A";
+            return s;
+        }
+
+        function applyServiceSnapshot(d) {
+            if (!d) return;
+            // Update Service tab inputs only if they exist on this page
+            if (!$("#settings-service-tab").length) return;
+
+            // Temp compensation (A03)
+            if (d.tempcompensation !== undefined || d.tempcompensation_set !== undefined) {
+                const curN = svcToNumber(d.tempcompensation);
+                const setN = svcToNumber(d.tempcompensation_set);
+                const display = (curN !== null) ? curN : ((setN !== null) ? setN : 0.0);
+                $("#tempcompensation_set").val(svcFmtDelta(display));
+            }
+
+            // DHW temperature compensation (A0d)
+            if (d.dhwcompensation !== undefined || d.dhwcompensation_set !== undefined) {
+                const dhwCurN = svcToNumber(d.dhwcompensation);
+                const dhwSetN = svcToNumber(d.dhwcompensation_set);
+                const dhwDisplay = (dhwCurN !== null) ? dhwCurN : ((dhwSetN !== null) ? dhwSetN : 0.0);
+                $("#dhwcompensation_set").val(svcFmtDelta(dhwDisplay));
+            }
+
+            // Errors + firmware
+            if (d.error !== undefined) $("#service_error").val(svcFmtPlain(d.error));
+            if (d.lasterror !== undefined) $("#service_lasterror").val(svcFmtPlain(d.lasterror));
+            if (d.archerror !== undefined) $("#service_archerror").val(svcFmtPlain(d.archerror));
+            if (d.firmware !== undefined) $("#service_firmware").val(svcFmtPlain(d.firmware));
+
+            // Service-test state (availability)
+            window.__svc = window.__svc || {};
+            if (d.pump !== undefined) window.__svc.pump = d.pump;
+            if (d.heater !== undefined) window.__svc.heater = d.heater;
+            if (d.heatdemand !== undefined) window.__svc.heatdemand = d.heatdemand;
+            if (d.compinfo !== undefined) window.__svc.compinfo = d.compinfo;
+
+// Service test duration (minutes) - accept either *_min or *_s (seconds)
+if (d.service_test_duration_min !== undefined || d.service_test_duration_s !== undefined) {
+    const $dur = $("#service_test_duration_min");
+    if ($dur.length) {
+        let mVal = NaN;
+        if (d.service_test_duration_min !== undefined) {
+            mVal = Number(d.service_test_duration_min);
+        } else {
+            const s = Number(d.service_test_duration_s);
+            mVal = Number.isFinite(s) ? (Math.round((s / 60) * 2) / 2) : NaN;
+        }
+        if (!Number.isFinite(mVal) || mVal < 0.5) mVal = 5;
+        mVal = Math.max(0.5, Math.min(240, (Math.round(mVal * 2) / 2)));
+        if (!$dur.is(":focus")) {
+            const cur = parseFloat(String($dur.val() || '').replace(',', '.'));
+            if (!Number.isFinite(cur) || cur !== mVal) $dur.val((Number.isInteger(mVal) ? String(mVal) : mVal.toFixed(1)));
+        }
+    }
+}
+            updateServiceTestUI();
+        }
+
+        function loadServiceData() {
+            // Only run if Service tab exists on this page
+            if (!$("#settings-service-tab").length) return;
+
+            // Prefer websocket snapshot (instant) when available
+            try {
+                if (socket && socket.connected) {
+                    socket.emit('client', { get_service: 1 });
+                    return;
+                }
+            } catch (e) {}
+
+            $.getJSON("/getdata", function (d) {
+                // Temperature compensation
+                // Prefer actual readback if available, otherwise fall back to last set value.
+                const curN = svcToNumber(d.tempcompensation);
+                const setN = svcToNumber(d.tempcompensation_set);
+                const display = (curN !== null) ? curN : ((setN !== null) ? setN : 0.0);
+
+                $("#tempcompensation_set").val(svcFmtDelta(display));
+
+                // DHW temperature compensation (A0d)
+                const dhwCurN = svcToNumber(d.dhwcompensation);
+                const dhwSetN = svcToNumber(d.dhwcompensation_set);
+                const dhwDisplay = (dhwCurN !== null) ? dhwCurN : ((dhwSetN !== null) ? dhwSetN : 0.0);
+                $("#dhwcompensation_set").val(svcFmtDelta(dhwDisplay));
+
+                // Service test switches + availability
+                window.__svc = window.__svc || {};
+                // Some fields (pump, compinfo, errors) are now served by /getparams.
+                if (d.pump !== undefined) window.__svc.pump = d.pump; // backward-compatible fallback
+                window.__svc.heater = d.heater;
+                window.__svc.heatdemand = d.heatdemand;
+                if (d.compinfo !== undefined) window.__svc.compinfo = d.compinfo; // backward-compatible fallback
+                window.__svc.set_pump = d.set_pump;
+                window.__svc.set_heater = d.set_heater;
+                // Service test duration (minutes) - from backend seconds
+                window.__svc.service_test_duration_s = d.service_test_duration_s;
+                const $dur = $("#service_test_duration_min");
+                if ($dur.length) {
+                    const s = Number(d.service_test_duration_s);
+                    let m = Number.isFinite(s) ? (Math.round((s / 60) * 2) / 2) : NaN;
+                    if (!Number.isFinite(m) || m < 0.5) m = 5;
+                    m = Math.max(0.5, Math.min(240, (Math.round(m * 2) / 2)));
+                    // do not override while user is editing
+                    if (!$dur.is(":focus")) {
+                        const cur = parseFloat(String($dur.val() || '').replace(',', '.'));
+                        if (!Number.isFinite(cur) || cur !== m) {
+                            $dur.val((Number.isInteger(m) ? String(m) : m.toFixed(1)));
+                        }
+                    }
+                }
+                updateServiceTestUI();
+
+            });
+
+
+            // Diagnostics & error codes are served by /getparams
+            $.getJSON("/getparams", function (p) {
+                window.__svc = window.__svc || {};
+                if (p.pump !== undefined) window.__svc.pump = p.pump;
+                if (p.compinfo !== undefined) window.__svc.compinfo = p.compinfo;
+
+                $("#service_error").val(svcFmtPlain(p.error));
+                $("#service_lasterror").val(svcFmtPlain(p.lasterror));
+                $("#service_archerror").val(svcFmtPlain(p.archerror));
+                $("#service_firmware").val(svcFmtPlain(p.firmware));
+
+                updateServiceTestUI();
+            });
+        }
+
+        function serviceTestAllowed(state) {
+            state = state || (window.__svc || {});
+            const pump = String(state.pump || '').trim().toLowerCase();
+            const heater = String(state.heater || '').trim().toLowerCase();
+            const heatdemand = String(state.heatdemand || '').trim().toLowerCase();
+            const compinfo = state.compinfo;
+
+            const pumpOff = (pump === 'off' || pump === '0' || pump === 'false' || pump === '');
+            const heaterOff = (heater === 'off' || heater === '0' || heater === 'false' || heater === '');
+            const heatdemandZero = (heatdemand === '0' || heatdemand === 'off' || heatdemand === 'false');
+
+            let compStopped = false;
+            try {
+                if (Array.isArray(compinfo) && compinfo.length >= 2) {
+                    const a = Number(compinfo[0]);
+                    const b = Number(compinfo[1]);
+                    compStopped = Math.max(a || 0, b || 0) <= 0.1;
+                } else if (Array.isArray(compinfo) && compinfo.length === 1) {
+                    const a = Number(compinfo[0]);
+                    compStopped = (a || 0) <= 0.1;
+                } else {
+                    compStopped = false;
+                }
+            } catch (e) {
+                compStopped = false;
+            }
+
+            return pumpOff && heaterOff && heatdemandZero && compStopped;
+        }
+
+        function updateServiceTestUI() {
+            if (!$("#settings-service-tab").length) return;
+
+            const st = window.__svc || {};
+            const pumpChecked = String(st.set_pump || '').toLowerCase() === 'on';
+            const heaterChecked = String(st.set_heater || '').toLowerCase() === 'on';
+
+            $("#service_set_pump").prop('checked', pumpChecked);
+            $("#service_set_heater").prop('checked', heaterChecked);
+
+            const allow = serviceTestAllowed(st);
+
+            // Availability box on the right
+            const $avail = $("#service_test_available");
+            if ($avail.length) {
+                const isAvailable = !!allow;
+                $avail.val(isAvailable ? t('set.available', 'Dostępny') : t('set.unavailable', 'Niedostępny'));
+                $avail.removeClass('svc-available svc-unavailable text-success text-danger');
+                $avail[0].classList.add(isAvailable ? 'svc-available' : 'svc-unavailable');
+            }
+
+            // Allow turning OFF even when conditions are not met
+            $("#service_set_pump").prop('disabled', (!allow && !pumpChecked));
+            $("#service_set_heater").prop('disabled', (!allow && !heaterChecked));
+
+            // Note: we display availability only in the right-side box
+        }
+
+        function getTempCompSetNumeric() {
+            const n = svcToNumber($("#tempcompensation_set").val());
+            return (n === null) ? 0.0 : n;
+        }
+
+        function setTempCompensation(value) {
+            // Clamp and round to 0.5
+            let v = Number(value);
+            if (!Number.isFinite(v)) v = 0.0;
+            v = Math.max(-15.0, Math.min(15.0, v));
+            v = Math.round(v * 2) / 2;
+
+            // UI: optimistic update (delta formatting)
+            $("#tempcompensation_set").val(svcFmtDelta(v));
+            // If readback is not instant, keep current in sync for better UX
+            // Send to backend
+            $("#tempcomp_minus, #tempcomp_plus").prop("disabled", true);
+            $.ajax({
+                url: "/tempcompchange",
+                method: "POST",
+                data: { value: v.toFixed(1) }
+            }).done(function (resp) {
+                if (resp && resp.msg && resp.state) {
+                    let m = resp.msg;
+                    if (typeof m === 'string' && m.trim().toLowerCase() === 'ok') m = 'toast.ch_comp_updated';
+                    appendAlert(m, resp.state);
+                } else if (typeof resp === 'string' && resp.trim().toLowerCase() === 'ok') {
+                    appendAlert('toast.ch_comp_updated', 'success');
+                }
+                // Refresh readback shortly after write
+                setTimeout(loadServiceData, 400);
+            }).fail(function () {
+                appendAlert("Temp compensation: request failed", "danger");
+                loadServiceData();
+            }).always(function () {
+                $("#tempcomp_minus, #tempcomp_plus").prop("disabled", false);
+            });
+        }
+
+        function getDhwTempCompSetNumeric() {
+            const n = svcToNumber($("#dhwcompensation_set").val());
+            return (n === null) ? 0.0 : n;
+        }
+
+        function setDhwTempCompensation(value) {
+            let v = Number(value);
+            if (!Number.isFinite(v)) v = 0.0;
+            v = Math.max(-15.0, Math.min(15.0, v));
+            v = Math.round(v * 2) / 2;
+            $("#dhwcompensation_set").val(svcFmtDelta(v));
+            $("#dhwtempcomp_minus, #dhwtempcomp_plus").prop("disabled", true);
+            $.ajax({
+                url: "/dhwcompchange",
+                method: "POST",
+                data: { value: v.toFixed(1) }
+            }).done(function (resp) {
+                if (resp && resp.msg && resp.state) {
+                    let m = resp.msg;
+                    if (typeof m === 'string' && m.trim().toLowerCase() === 'ok') m = 'toast.dhw_comp_updated';
+                    appendAlert(m, resp.state);
+                } else if (typeof resp === 'string' && resp.trim().toLowerCase() === 'ok') {
+                    appendAlert('toast.dhw_comp_updated', 'success');
+                }
+                setTimeout(loadServiceData, 400);
+            }).fail(function () {
+                appendAlert("DHW compensation: request failed", "danger");
+                loadServiceData();
+            }).always(function () {
+                $("#dhwtempcomp_minus, #dhwtempcomp_plus").prop("disabled", false);
+            });
+        }
+
+        // Buttons + / -
+        $("#tempcomp_minus").on("click", function () {
+            const v = getTempCompSetNumeric() - 0.5;
+            setTempCompensation(v);
+        });
+        $("#tempcomp_plus").on("click", function () {
+            const v = getTempCompSetNumeric() + 0.5;
+            setTempCompensation(v);
+        });
+
+        // DHW comp buttons + / -
+        $("#dhwtempcomp_minus").on("click", function () {
+            const v = getDhwTempCompSetNumeric() - 0.5;
+            setDhwTempCompensation(v);
+        });
+        $("#dhwtempcomp_plus").on("click", function () {
+            const v = getDhwTempCompSetNumeric() + 0.5;
+            setDhwTempCompensation(v);
+        });
+
+        // Service test switches (socket)
+        function emitServiceTest(key, on) {
+            try {
+                if (socket && typeof socket.emit === 'function') {
+                    const payload = {};
+                    payload[key] = on ? 'on' : 'off';
+                    socket.emit('client', payload);
+                }
+            } catch (e) { }
+        }
+
+        // Service test duration (min): immediate save via HTTP (Service tab has no global Save)
+        function normalizeServiceTestDurationMin(raw) {
+            const s = String(raw ?? '').trim().replace(',', '.');
+            const v = parseFloat(s);
+            if (!Number.isFinite(v)) return NaN;
+            const clamped = Math.max(0.5, Math.min(240, v));
+            return Math.round(clamped * 2) / 2;
+        }
+
+        function formatHalfMinute(v) {
+            const n = Math.round(Number(v) * 2) / 2;
+            if (!Number.isFinite(n)) return '';
+            return Number.isInteger(n) ? String(n) : n.toFixed(1);
+        }
+
+        function setServiceTestDurationMin(minVal) {
+            let m = normalizeServiceTestDurationMin(minVal);
+            if (!Number.isFinite(m)) m = 5;
+            m = Math.round(m * 2) / 2;
+
+            // Keep UI clamped/normalized
+            const $dur = $("#service_test_duration_min");
+            if ($dur.length) {
+                const cur = normalizeServiceTestDurationMin($dur.val());
+                if (!Number.isFinite(cur) || cur !== m) $dur.val(formatHalfMinute(m));
+            }
+
+            $.ajax({
+                url: "/service_test_duration",
+                method: "POST",
+                data: { value: String(m) }
+            }).done(function (resp) {
+                if (resp && resp.msg && resp.state) {
+                    let m = resp.msg;
+                    if (typeof m === 'string' && m.trim().toLowerCase() === 'ok') m = 'toast.service_duration_saved';
+                    appendAlert(m, resp.state);
+                } else if (typeof resp === 'string' && resp.trim().toLowerCase() === 'ok') {
+                    appendAlert('toast.service_duration_saved', 'success');
+                }
+                // refresh readback shortly after write
+                setTimeout(loadServiceData, 400);
+            }).fail(function () {
+                appendAlert("Service test duration: request failed", "danger");
+                loadServiceData();
+            });
+        }
+
+        // Save on Enter / blur / 1s after last input
+        (function () {
+            const $dur = $("#service_test_duration_min");
+            if (!$dur.length) return;
+
+            let tmr = null;
+
+            function commit() {
+                if (tmr) clearTimeout(tmr);
+                tmr = null;
+                setServiceTestDurationMin($dur.val());
+            }
+
+            function schedule() {
+                if (tmr) clearTimeout(tmr);
+                tmr = setTimeout(commit, 1000);
+            }
+
+            $dur.on("input", schedule);
+
+            $dur.on("keydown", function (ev) {
+                if (ev.key === "Enter") {
+                    ev.preventDefault();
+                    commit();
+                    return;
+                }
+                if (ev.key === "ArrowUp" || ev.key === "ArrowDown") {
+                    // prevent accidental step changes (requested)
+                    ev.preventDefault();
+                }
+            });
+
+            $dur.on("blur", commit);
+
+            // prevent accidental scroll changes while focused
+            $dur.on("wheel", function () {
+                if (document.activeElement === this) $(this).blur();
+            });
+        })();;
+
+
+        $("#service_set_pump").on("change", function () {
+            const checked = $(this).is(":checked");
+            if (checked && !serviceTestAllowed()) {
+                // snap back
+                $(this).prop('checked', false);
+                updateServiceTestUI();
+                appendAlert(t('set.service_test_not_ready', 'Not available (conditions not met)'), 'warning');
+                return;
+            }
+            // Optimistic UI: keep the switch in sync immediately, backend will confirm/deny via data_update
+            window.__svc = window.__svc || {};
+            window.__svc.set_pump = checked ? 'on' : 'off';
+            updateServiceTestUI();
+            window.__lastOkContext = checked ? 'service_pump_on' : 'service_pump_off';
+            emitServiceTest('set_pump', checked);
+        });
+
+        $("#service_set_heater").on("change", function () {
+            const checked = $(this).is(":checked");
+            if (checked && !serviceTestAllowed()) {
+                $(this).prop('checked', false);
+                updateServiceTestUI();
+                appendAlert(t('set.service_test_not_ready', 'Not available (conditions not met)'), 'warning');
+                return;
+            }
+            window.__svc = window.__svc || {};
+            window.__svc.set_heater = checked ? 'on' : 'off';
+            updateServiceTestUI();
+            window.__lastOkContext = checked ? 'service_heater_on' : 'service_heater_off';
+            emitServiceTest('set_heater', checked);
+        });
+
+        // ---- Service polling: run ONLY when the Service tab is visible (and the page is visible) ----
+        let __svcPollTimer = null;
+        function __isServiceTabActive() {
+            const $pane = $("#settings-service-tab");
+            return ($pane.length && $pane.hasClass("active") && $pane.hasClass("show"));
+        }
+        function startServicePolling() {
+            if (__svcPollTimer) return;
+            loadServiceData();
+            __svcPollTimer = setInterval(loadServiceData, 5000);
+        }
+        function stopServicePolling() {
+            if (!__svcPollTimer) return;
+            clearInterval(__svcPollTimer);
+            __svcPollTimer = null;
+        }
+        function refreshServicePolling() {
+            if (document.hidden) { stopServicePolling(); return; }
+            if (__isServiceTabActive()) startServicePolling();
+            else stopServicePolling();
+        }
+
+        // Initial state (start only if Service tab is initially active)
+        refreshServicePolling();
+        document.addEventListener('visibilitychange', refreshServicePolling);
+
+
+        // Live updates (auto-off, etc.)
+        try {
+            if (socket && typeof socket.on === 'function') {
+                socket.on('data_update', function (msg) {
+                    if (!msg) return;
+                    window.__svc = window.__svc || {};
+                    if (msg.hasOwnProperty('set_pump')) window.__svc.set_pump = msg.set_pump;
+                    if (msg.hasOwnProperty('set_heater')) window.__svc.set_heater = msg.set_heater;
+                    if (msg.hasOwnProperty('pump')) window.__svc.pump = msg.pump;
+                    if (msg.hasOwnProperty('heater')) window.__svc.heater = msg.heater;
+                    if (msg.hasOwnProperty('heatdemand')) window.__svc.heatdemand = msg.heatdemand;
+                    if (msg.hasOwnProperty('compinfo')) window.__svc.compinfo = msg.compinfo;
+                    applyServiceSnapshot(msg);
+                });
+            }
+        } catch (e) {}
+
+        // Keep global "Save" button right under the last content of the active tab
+        function placeSaveButtonIntoActiveTab() {
+            const $row = $("#saveRow");
+            if (!$row.length) return;
+            const $activePane = $(".tab-pane.active.show");
+            if ($activePane.length) {
+                $activePane.append($row);
+            }
+        }
+
+
+
+        // Hide global "Save" button on Service tab (not needed there)
+        function toggleSaveButtonForTab(tabId) {
+            const $row = $("#saveRow");
+            if (!$row.length) return;
+            if (tabId === "settings-service") {
+                $row.addClass('d-none');
+            } else {
+                $row.removeClass('d-none');
+            }
+        }
+        // Refresh when user opens a tab + move Save button under that tab content
+        document.addEventListener('shown.bs.tab', function (e) {
+            try {
+                const targetSel = (e && e.target) ? (e.target.getAttribute("data-bs-target") || e.target.getAttribute("href")) : null;
+                if (targetSel) {
+                    $(targetSel).append($("#saveRow"));
+                }
+
+                if (e && e.target && e.target.id) {
+                    toggleSaveButtonForTab(e.target.id);
+                    refreshServicePolling();
+                    try {
+                        if (e && e.target && e.target.id === "settings-service" && socket && socket.connected) {
+                            socket.emit('client', { get_service: 1 });
+                        }
+                    } catch (err2) {}
+                }
+            } catch (err) { }
+        });
+
+        // Initial state (place Save button under current tab)
+        placeSaveButtonIntoActiveTab();
+        toggleSaveButtonForTab($(".nav-link.active").attr("id"));
+
+    });
+
+    // ########### LOGIKA WYKRESU (pozostawiona w większości bez zmian) ###########
+
+    var colors = ['#007bff', '#28a745', '#333333', '#c3e6cb', '#dc3545', '#6c757d'];
+    var chLine = document.getElementById('hcurvechart');
+    var myChart; // Zmienna globalna dla wykresu
+
+    var chartData = {
+        labels: Array.from({ length: 41 }, (_, i) => i - 20).map(String), // Lepszy sposób generowania etykiet
+        datasets: [{
+            label: "Auto",
+            data: [],
+            backgroundColor: 'transparent',
+            borderColor: colors[0],
+            borderWidth: 4,
+            pointBackgroundColor: colors[0]
+        }, {
+            label: "Static",
+            data: [],
+            backgroundColor: 'transparent',
+            borderColor: colors[1],
+            borderWidth: 4,
+            pointBackgroundColor: colors[1]
+        }]
+    };
+
+    if (chLine) {
+        myChart = new Chart(chLine, {
+            type: 'line',
+            data: chartData,
+            options: { /* ... Twoje opcje ... */ }
+        });
+    }
+
+    function recalc() {
+        if (!myChart) return; // Zabezpieczenie, jeśli wykres nie istnieje
+
+        const settemp = 22; // Powinno być pobierane z ustawień
+        const insidetemp = parseFloat($("#tempRange").val()) || settemp;
+        const outsidetemp = 11; // Powinno być pobierane z danych
+
+        $("#customtemp").text("Temperatura wewnątrz: " + insidetemp);
+
+        const slope = parseFloat($('#slope').val()) || 0;
+        const ps = parseFloat($('#pshift').val()) || 0;
+        const amp = parseFloat($('#hcamp').val()) || 0;
+
+        const autoData = myChart.data.labels.map(element => {
+            const outTemp = parseFloat(element);
+            const t1 = (outsidetemp / (320 - (outsidetemp * 4)));
+            const t2 = Math.pow(settemp, t1);
+            return ((((0.55 * slope * t2) * (((-outTemp + 20) * 2) + settemp + ps) + ((settemp - insidetemp) * amp)) + ps) * 2) / 2;
+        });
+
+        const staticData = myChart.data.labels.map(element => {
+            const outTemp = parseFloat(element);
+            return (settemp + (slope * 20) * Math.pow(((settemp - outTemp) / 20), 0.7));
+        });
+
+        myChart.data.datasets[0].data = autoData;
+        myChart.data.datasets[1].data = staticData;
+        myChart.update();
+    }
+
+    // ########### LOGIKA NIEZAPISANYCH ZMIAN (pozostawiona bez zmian) ###########
+    let isFormDirty = false;
+    const modal = new bootstrap.Modal(document.getElementById("unsavedChangesModal"));
+    let pendingNavigation = null;
+
+    document.addEventListener("input", (event) => {
+        const el = event && event.target ? event.target : null;
+        if (!el || !el.matches("input, select, textarea")) return;
+
+        // Service tab contains only "live" controls (no saving) – don't mark page as dirty
+        // so leaving the page doesn't show the unsaved-changes modal after using service tests.
+        if (el.closest && el.closest("#settings-service-tab")) return;
+
+        // Thermostat hysteresis is saved immediately (live) – don't mark page as dirty.
+        if (el.id === 'lohysteresis' || el.id === 'hihysteresis') return;
+
+        // Defensive: ignore readonly/disabled fields
+        if (el.hasAttribute && (el.hasAttribute("readonly") || el.disabled)) return;
+
+        isFormDirty = true;
+    });
+    document.querySelectorAll(".navl").forEach(link => {
+        link.addEventListener("click", (event) => {
+            if (isFormDirty) {
+                event.preventDefault();
+                pendingNavigation = event.target.href;
+                modal.show();
+            }
+        });
+    });
+    document.getElementById("leavePageBtn").addEventListener("click", () => {
+        if (pendingNavigation) {
+            window.location.href = pendingNavigation;
+        }
+    });
+
+    // --- System tab: show server (DietPi) date & time ---
+    function formatSystemDateTime(raw) {
+        if (raw === null || raw === undefined) return '';
+        const s = String(raw).trim();
+        if (!s) return '';
+
+        // requested format: HH:MM DD-MM-YY (without seconds, short year)
+        if (/^\d{2}:\d{2}\s+\d{2}-\d{2}-\d{2}$/.test(s)) {
+            return s.replace(/\s+/, ' ');
+        }
+        // legacy format: DD-MM-YY HH:MM -> convert
+        if (/^\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}$/.test(s)) {
+            const p = s.split(/\s+/);
+            return `${p[1]} ${p[0]}`;
+        }
+
+        // common backend formats: YYYY-MM-DD HH:MM[:SS] (space or 'T')
+        const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+        if (m) {
+            const yy = String(Number(m[1]) % 100).padStart(2, '0');
+            return `${m[4]}:${m[5]} ${m[3]}-${m[2]}-${yy}`;
+        }
+
+        // ISO-like / other formats supported by Date()
+        const d = new Date(s);
+        if (!isNaN(d.getTime())) {
+            const pad = (n) => String(n).padStart(2, '0');
+            const dd = pad(d.getDate());
+            const mm = pad(d.getMonth() + 1);
+            const yy = pad(d.getFullYear() % 100);
+            const hh = pad(d.getHours());
+            const mi = pad(d.getMinutes());
+            return `${hh}:${mi} ${dd}-${mm}-${yy}`;
+        }
+
+        return s; // fallback
+    }
+
+    function updateSystemDateTime() {
+        const el = document.getElementById('system_datetime_value');
+        if (!el) return;
+        $.getJSON('/api/system_time')
+            .done(function (data) {
+                const raw = (data && (data.iso || data.display)) ? (data.iso || data.display) : '';
+                const val = formatSystemDateTime(raw);
+                if ('value' in el) { el.value = val; } else { el.textContent = val; }
+            })
+            .fail(function () {
+                // ignore
+            });
+    }
+
+
+// initial + refresh when switching tabs + periodic refresh
+    updateSystemDateTime();
+    setInterval(updateSystemDateTime, 30000);
+    document.addEventListener('shown.bs.tab', function (ev) {
+        // refresh when System tab is shown
+        if (ev && ev.target && (ev.target.id === 'settings-system' || ev.target.getAttribute('data-bs-target') === '#settings-system-tab')) {
+            updateSystemDateTime();
+        }
+    });
+
+    // Inicjalizacja tooltipów
+    const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+    const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+
+</script>
+{% endblock %}
