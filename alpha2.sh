@@ -13,7 +13,7 @@ systemctl stop "$SERVICE"
 rm -rf "$BASE_DIR/static" "$BASE_DIR/templates" "$BASE_DIR/main.py"
 cd "$BASE_DIR"
 
-curl -sL https://github.com/kamilostatek/hpi/raw/refs/heads/main/1.4.5.alpha2.tar.gz | tar -xz
+curl -sL https://github.com/kamilostatek/hpi/raw/refs/heads/main/1.4.5_alpha2.tar.gz | tar -xz
 
 cp "$CONFIG" "${CONFIG}.backup"
 
