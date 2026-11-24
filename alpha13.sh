@@ -208,6 +208,45 @@ fi
 # START
 # -------------------------------------------------
 
+# -------------------------------------------------
+# Fix published compressor frequency mapping and signed SH/SC values
+# Verify the exact alpha13 source before modifying it.
+# -------------------------------------------------
+HPI_MAIN_PY="$BASE_DIR/main.py" python3 - <<'HPI_METRICS'
+from pathlib import Path
+import ast
+import os
+
+path = Path(os.environ["HPI_MAIN_PY"])
+source = path.read_text(encoding="utf-8")
+
+replacements = [
+    ('superheat = f"{abs(Ts - TsatPs_act):.1f}"',
+     'superheat = f"{Ts - TsatPs_act:.1f}"'),
+    ('subcooling = f"{abs(TsatPd_act - Thi):.1f}"',
+     'subcooling = f"{TsatPd_act - Thi:.1f}"'),
+    ('''configure_sensor("Compressor fact", st('compinfo'), "HaierPi_Compfact", "Hz", "frequency", "measurement", "{{ value_json[0] | float }}")''',
+     '''configure_sensor("Compressor fact", st('compinfo'), "HaierPi_Compfact", "Hz", "frequency", "measurement", "{{ value_json[1] | float }}")'''),
+    ('''configure_sensor("Compressor fset", st('compinfo'), "HaierPi_Compfset", "Hz", "frequency", "measurement", "{{ value_json[1] | float }}")''',
+     '''configure_sensor("Compressor fset", st('compinfo'), "HaierPi_Compfset", "Hz", "frequency", "measurement", "{{ value_json[0] | float }}")'''),
+]
+
+changed = 0
+for before, after in replacements:
+    if source.count(before) == 1 and source.count(after) == 0:
+        source = source.replace(before, after, 1)
+        changed += 1
+    elif source.count(before) == 0 and source.count(after) == 1:
+        continue  # Already patched
+    else:
+        raise RuntimeError("Unexpected HaierPi alpha13 metric layout: " + before[:80])
+
+ast.parse(source, filename=str(path))
+if changed:
+    path.write_text(source, encoding="utf-8")
+print("HaierPi metrics: %d change(s), 4 verified sites." % changed)
+HPI_METRICS
+
 echo
 echo "🚀 Startuję usługę Haier..."
 systemctl start "$SERVICE" \
