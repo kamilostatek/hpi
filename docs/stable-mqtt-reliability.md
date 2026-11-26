@@ -4,9 +4,9 @@ Base: original 1.4.5 Stable archive (SHA-256 `ca803a3f8777efa75a40739d2efeb03623
 
 ## Scope
 
-The existing MQTT connection worker may report a connection without a recent successful publish. Add one outstanding QoS 1 refresh of its existing retained availability topic (`<configured topic>/haierpi/connected`), at most once per 30 seconds after a successful acknowledgement. No extra MQTT client, subscription, callback, configuration field, HA dependency, write to pump or new topic. PUBACK is evidence that the broker acknowledged the publish, not proof that subscribers or HA received/processsed it; MQTT 3.1.1 cannot report broker authorization details reliably. Existing pump-frame freshness remains independent.
+The existing MQTT connection worker may report a connection without a recent successful publish. Add one outstanding QoS 1 refresh of its existing retained availability topic (`<configured topic>/haierpi/connected`), at most once per 30 seconds after a successful acknowledgement. No extra MQTT client, subscription, callback, configuration field, HA dependency, write to pump or new topic. PUBACK is evidence that the broker acknowledged the publish, not proof that subscribers or HA received/processed it; MQTT 3.1.1 cannot report broker authorization details reliably. Existing pump-frame freshness remains independent.
 
-Warn when the acknowledgement is missing for 90 seconds. Only after a prior successful acknowledgement request a reconnect in the existing worker; at most once per 300 seconds. Do not accumulate new probes while one is outstanding, and do not probe while disconnected or stopping. Existing reconnect/backoff logic remains in charge. No forced reconnect if the first acknowledgement never arrives. The patch targets Stable's Paho worker and requires an MQTTMessageInfo object exposing is_published().
+Warn when the acknowledgement is missing for 90 seconds. Only after a prior successful acknowledgement request a reconnect in the existing worker; at most once per 300 seconds. Do not accumulate new probes while one is outstanding, and do not probe while disconnected or stopping. The revised worker explicitly reconnects after failed connect or loop calls, with interruptible backoff of 1–30 seconds, reset after confirmed connection, and a 15-second CONNACK deadline. Retries no longer depend on the private socket attribute. No forced reconnect if the first acknowledgement never arrives. The patch targets Stable's Paho worker and requires an MQTTMessageInfo object exposing is_published().
 
 ## Test / install on HaierPi
 
@@ -34,12 +34,24 @@ Tested on a NanoPi running Stable 1.4.5 with local patches. After applying the f
 
 MQTT also connected and received PUBACK during the earlier read-only boot despite initial network unavailability. Pump telemetry worked normally after reboot with persistent read-write storage. Python 3.9/3.11 regression tests passed against the original Stable archive, including simulated timeout and reconnect cooldown: https://github.com/petec999/hpi/actions/runs/45788755974.
 
-Further testing under actual broker failure and recovery conditions, including a stalled PUBACK, is welcome.
+## Reconnect v2 validation
+
+The original worker recovered only after an extended interruption during a broker outage test. The revised worker (installed commit 7a876cc20fa478203cc195ff9e62a72c3c8d8be8) was tested against a second actual Mosquitto outage on NanoPi:
+
+- 11:03:23: MQTT connection lost (loop rc=7).
+- Reconnect delays: 1, 1.8, 3.2, 5.8, 10.5, 18.9 and 30 seconds.
+- 11:04:34: connection established automatically, same HaierPi process.
+- 11:05:02: Home Assistant confirmed reception of the independent heartbeat.
+
+The latest source compatibility revision (e8646100b2e09222d139f42a36ed0022558a3a73) changes the patcher's source matching, not the installed reconnect logic. Both Python 3.9 and 3.11 jobs passed regression tests and the real Paho/Mosquitto outage integration test: https://github.com/petec999/hpi/actions/runs/45797409471
+
+The full-device reboot test above was performed with the first PUBACK patch before the reconnect revision. The stalled-PUBACK recovery path has simulated coverage but has not yet been reproduced on NanoPi with TCP still connected.
 
 ## Upstream checklist
 
 - [x] Unit tests against original Stable source.
-- [ ] Test with real Paho/Mosquitto.
+- [x] Real Paho/Mosquitto integration test and physical broker outage/recovery.
 - [x] Normal startup and broker acknowledgement on NanoPi after service restart and full reboot.
 - [ ] Check without HA.
-- [ ] Verify recovery and absence of reconnect loops.
+- [x] Observed bounded reconnect backoff and successful recovery during broker outage.
+- [ ] Physical stalled-PUBACK fault injection.
