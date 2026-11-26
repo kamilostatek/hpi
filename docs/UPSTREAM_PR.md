@@ -14,6 +14,7 @@ MQTT communication can remain unavailable for an extended period after the broke
 - Python 3.9/3.11 regression tests against the original Stable 1.4.5 archive passed, including simulated stale socket, PUBACK timeout and cooldown.
 - Real Paho/Mosquitto integration test passed after stopping and restarting a disposable broker: https://github.com/petec999/hpi/actions/runs/45797409471
 - Tested on a NanoPi running Stable 1.4.5 with local patches. During an actual Mosquitto outage, reconnection attempts followed the expected backoff and communication recovered automatically without restarting HaierPi. Home Assistant confirmed reception after reconnect.
+- Full NanoPi reboot with the revised worker: initial connection failure recovered on the next attempt, followed by PUBACK and HA heartbeat confirmation. UART reception was verified.
 - Further testing of a stalled PUBACK with TCP still connected is welcome.
 
 PUBACK confirms broker acknowledgement, not subscriber reception. See docs/stable-mqtt-reliability.md for verification and rollback.
