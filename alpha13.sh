@@ -15,6 +15,49 @@ cd "$BASE_DIR"
 
 curl -sL https://github.com/kamilostatek/hpi/raw/refs/heads/main/1.4.5_alpha13.tar.gz | tar -xz
 
+# -------------------------------------------------
+# Remove only retired SENSOR discovery configurations in alpha13.
+# Keep the current binary_sensor, number, climate and switch entities.
+# HA must receive the retained empty config on the next MQTT discovery run.
+# -------------------------------------------------
+HPI_MAIN_PY="$BASE_DIR/main.py" python3 - <<'PYHAIER_LEGACY_DISCOVERY'
+import ast
+import os
+from pathlib import Path
+
+path = Path(os.environ["HPI_MAIN_PY"])
+source = path.read_text(encoding="utf-8")
+anchor = "    _clear('sensor', 'HaierPi_DHWSet')\n"
+marker = "    # Legacy sensors retired in alpha13: use newer discovery entities.\n"
+legacy = {
+    # Old pressure sensors superseded by Pd/Ps set/actual sensors (bar).
+    "HaierPi_Pd",
+    "HaierPi_Ps",
+    # Old read-only CH/DHW switch states: binary_sensor replacements exist.
+    "HaierPi_PCH",
+    "HaierPi_PCool",
+    "HaierPi_PDHW",
+    # Discontinued estimated daily compressor-energy counters.
+    "HaierPi_CH_daily_kWh",
+    "HaierPi_DHW_daily_kWh",
+    # Removed ECO delta sensor (quiet/turbo/flimit deltas remain supported).
+    "HaierPi_DeltaTempEco",
+}
+# Never remove retained configs for current entities (e.g. HaierPi_Delta,
+# humidity, direct thermostat target, or the binary_sensor PCH/PCool/PDHW).
+if marker not in source:
+    if source.count(anchor) != 1:
+        raise RuntimeError("Unexpected HaierPi MQTT discovery layout")
+    lines = marker + "".join(
+        "    _clear('sensor', {!r})\n".format(unique_id)
+        for unique_id in sorted(legacy)
+    )
+    source = source.replace(anchor, anchor + lines, 1)
+    ast.parse(source, filename=str(path))
+    path.write_text(source, encoding="utf-8")
+print("HaierPi MQTT discovery: retired legacy sensor configs cleared on reconnect.")
+PYHAIER_LEGACY_DISCOVERY
+
 cp "$CONFIG" "${CONFIG}.backup"
 
 echo "✅ Podmiana zakończona"
