@@ -32,14 +32,14 @@ Rollback if frames do not return: copy the affected files from the exact printed
 
 ## Hardware validation — 2026-11-26
 
-Tested on a NanoPi running Stable 1.4.5 with local patches. After applying the fix and restarting the service, pump communication and telemetry worked normally. Python 3.9/3.11 tests passed against the original Stable main.py and legacy GPIO fixture: https://github.com/petec999/hpi/actions/runs/45788712613.
+Tested on a NanoPi running Stable 1.4.5 with local patches. Pump communication and telemetry worked normally after service restart and a full reboot with the device configured for persistent read-write storage. Python 3.9/3.11 tests passed against the original Stable main.py and legacy GPIO fixture: https://github.com/petec999/hpi/actions/runs/45788712613.
 
-Further testing on other supported devices, after a full reboot, and with a previously exported physical GPIO is welcome.
+A first reboot with the previous read-only overlay configuration showed no UART RX bytes and an existing shutdown failure when writing charts.pkl. After switching to persistent read-write storage, a full reboot succeeded with both patches unchanged (UART RX 3447, valid pump telemetry, error=0). The cause of the first boot's UART failure is not established. Further testing on other supported devices and with a previously exported physical GPIO is welcome.
 
 ## Upstream checklist
 
 - [x] Python regression tests against the pinned archive pass.
 - [x] Actual NanoPi/sysfs service restart and live telemetry.
-- [ ] Whole-device reboot.
-- [ ] Existing heating and MQTT operation unaffected.
+- [x] Whole-device reboot with persistent read-write storage.
+- [x] Normal heating and MQTT operation observed after reboot.
 - [ ] Check upstream hardware variants before claiming broad compatibility.
