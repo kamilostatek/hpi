@@ -14,7 +14,7 @@ PUBACK demonstrates broker acknowledgement only, not receipt by HA or another su
 
 ## Validation
 - Python 3.9/3.11 regression tests passed against the original Stable 1.4.5 archive, including simulated PUBACK timeout and reconnect cooldown (https://github.com/petec999/hpi/actions/runs/45788755974).
-- Tested on a NanoPi running Stable 1.4.5 with local patches. The broker confirmed PUBACK after service restart, and pump telemetry worked normally.
+- Tested on a NanoPi running Stable 1.4.5 with local patches. The broker confirmed PUBACK after service restart and full device reboot; pump telemetry worked normally after reboot with persistent read-write storage.
 - Further testing under actual broker failure and recovery conditions is welcome.
 
 See docs/stable-mqtt-reliability.md for verification and rollback.
