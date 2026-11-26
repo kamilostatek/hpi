@@ -26,10 +26,23 @@ Verify fresh pump frames, broker availability, MQTT discovery and normal control
 
 Rollback: copy main.py from the exact printed backup directory to /opt/haier/main.py, restart haier, verify telemetry. No credentials should be included in bug reports.
 
+## Hardware validation — 2026-11-26
+
+Tested commit af3938129d700fe77afa1524661b15874fc3ed31 on the existing NanoPi HaierPi 1.4.5_3 installation with the independent GPIO patch and existing HA end-to-end watchdog. The patch dry-run preserved the watchdog hook and only extended the MQTT worker. Service restart produced:
+
+    10:14:31 MQTT - Connected - climate/haier
+    10:14:31 MQTT broker PUBACK health confirmed
+    10:14:44 MQTT watchdog OK: HA confirmed heartbeat (failures=0 recoveries=0)
+
+At 10:15:12 the status snapshot contained valid water, compressor and pressure values, error=0. Python 3.9/3.11 tests passed: https://github.com/petec999/hpi/actions/runs/45788755974.
+
+Not tested on hardware: broker outage/recovery, stalled PUBACK, reconnect cooldown during a fault, interaction of both recovery mechanisms during a fault, whole-device reboot, or operation on a pristine Stable install without HA. Simulated tests cover timeout, cooldown, initial failure and shutdown; normal hardware operation does not prove fault recovery.
+
 ## Upstream checklist
 
-- [ ] Unit tests against original Stable source.
+- [x] Unit tests against original Stable source.
 - [ ] Test with real Paho/Mosquitto.
-- [ ] Hardware test on NanoPi; check with and without HA.
+- [x] Normal startup and broker acknowledgement on NanoPi with HA.
+- [ ] Check without HA.
 - [ ] Verify recovery and absence of reconnect loops.
 - [ ] Test compatibility with optional HA end-to-end watchdog separately.
