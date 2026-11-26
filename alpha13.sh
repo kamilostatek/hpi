@@ -15,6 +15,45 @@ cd "$BASE_DIR"
 
 curl -sL https://github.com/kamilostatek/hpi/raw/refs/heads/main/1.4.5_alpha13.tar.gz | tar -xz
 
+# -------------------------------------------------
+# Signed 12-bit U2 temperatures (Haier RS485 / PyHaier)
+# https://www.elektroda.pl/rtvforum/topic3994059-30.html#21714188
+# -------------------------------------------------
+# The alpha13 archive contains 10 cases of "-= 4095" in six PyHaier
+# temperature decoders. For 12-bit two's complement, subtract 4096.
+# Verify all expected files BEFORE changing any decoder; fail on unknown layouts.
+python3 - <<'PYHAIER_U2'
+import ast
+from pathlib import Path
+
+root = Path('/opt/haier/env/lib/python3.9/site-packages/PyHaier')
+expected = {
+    'GetTao.py': 1,
+    'GetTdef.py': 1,
+    'GetTdTs.py': 2,
+    'GetTSatPd.py': 2,
+    'GetTSatPs.py': 2,
+    'GetThiTho.py': 2,
+}
+old, new = ' -= 4095', ' -= 4096'
+changes = {}
+for name, count in expected.items():
+    path = root / name
+    original = path.read_text(encoding='utf-8')
+    if original.count(old) == count and original.count(new) == 0:
+        patched = original.replace(old, new)
+        ast.parse(patched, filename=str(path))
+        changes[path] = patched
+    elif original.count(old) == 0 and original.count(new) == count:
+        continue  # Already patched (safe re-run).
+    else:
+        raise RuntimeError(f'Unexpected PyHaier decoder layout: {path}')
+for path, patched in changes.items():
+    path.write_text(patched, encoding='utf-8')
+print(f'HaierPi U2: corrected {sum(expected.values())} temperature decodes '
+      f'in {len(expected)} files ({len(changes)} file(s) changed).')
+PYHAIER_U2
+
 cp "$CONFIG" "${CONFIG}.backup"
 
 echo "✅ Podmiana zakończona"
