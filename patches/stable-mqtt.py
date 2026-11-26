@@ -220,11 +220,11 @@ def patch(source):
     for key in ("cl.connect(", "cl = globals().get(", "sock_open", "MQTT_ERR_SUCCESS"):
         if key not in worker:
             raise ValueError("Missing worker contract: "+key)
-    start="    backoff = 1.0\n"
+    start="\n    backoff = 1.0\n"
     stop="    # Stop requested\n"
     if worker.count(start)!=1 or worker.count(stop)!=1:
         raise ValueError("Unexpected worker boundary")
-    original=worker[worker.index(start):worker.index(stop)]
+    original=worker[worker.index(start)+1:worker.index(stop)]
     if original.count("            rc = cl.loop(timeout=1.0)\n")!=1:
         raise ValueError("Unexpected loop layout")
     if "_wd_reconnect_request" in original:
