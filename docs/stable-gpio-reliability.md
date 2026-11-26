@@ -30,9 +30,16 @@ Verify the original status API / panel, fresh R141/R241, HA readings and normal 
 
 Rollback if frames do not return: copy the affected files from the exact printed backup directory back to their original paths (only files that exist in that backup), then restart haier and verify telemetry again. No configuration edits are needed.
 
+## Hardware validation — 2026-11-26
+
+Tested on the existing NanoPi HaierPi 1.4.5_3 installation with the original basic v2 WWW panel. The exact patch dry-run produced only the expected GPIO module changes and one main.py initialization change. Applied patch and restarted haier.service; user confirmed live pump frames and normal operation. A subsequent restart with the separate MQTT patch also produced complete pump telemetry (10:15:12, water, compressor and pressures, error=0). Python 3.9/3.11 tests passed against pinned Stable main.py and observed legacy GPIO fixture: https://github.com/petec999/hpi/actions/runs/45788712613.
+
+Not tested: whole-device reboot, an already-exported physical GPIO channel, other GPIO backends, or a pristine Stable device installation. The earlier WWW regression has not been proven to be caused by GPIO.
+
 ## Upstream checklist
 
-- [ ] Python regression tests against the pinned archive pass.
-- [ ] Actual NanoPi/sysfs hardware restart and reboot.
+- [x] Python regression tests against the pinned archive pass.
+- [x] Actual NanoPi/sysfs service restart and live telemetry.
+- [ ] Whole-device reboot.
 - [ ] Existing heating and MQTT operation unaffected.
 - [ ] Check upstream hardware variants before claiming broad compatibility.
