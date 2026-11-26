@@ -10,7 +10,7 @@ The original sysfs GPIO setup unexports an already exported channel and then ski
 
 Reuse an exported channel; export only when necessary; wait up to one second for the sysfs direction file, accept an EBUSY export race, and set the direction and initial level using the kernel's atomic `low`/ `high` direction operation. The existing RS485 driver defines LOW as receive mode. The original two-argument setup calls still work. Preserve output failure return value, but log the error. No shutdown ordering, pin numbering, control commands, serial parser, MQTT or WWW changes.
 
-This targets the sysfs GPIO implementation shipped in Stable; other GPIO backends need their own compatibility verification. The observed loss of frames after a separate WWW change is not proven to be caused by this defect.
+Stable updates main.py but does not ship HPi/GPIO.py. The test fixture is the legacy GPIO module observed on an existing NanoPi installation; main.py is validated against the actual pinned Stable archive. The patch targets that legacy sysfs GPIO implementation only and refuses other implementations. The observed loss of frames after a separate WWW change is not proven to be caused by this defect.
 
 ## Test / install on HaierPi
 
