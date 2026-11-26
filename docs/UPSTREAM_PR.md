@@ -12,10 +12,8 @@ The legacy HPi.GPIO sysfs setup unexports an already exported pin, then skips ex
 Stable ships main.py but not HPi/GPIO.py. The patcher validates the observed legacy implementation and refuses unknown layouts; the reviewable patch is supplied separately rather than replacing the tarball. No MQTT, heating, frame parser or WWW changes.
 
 ## Validation
-- Python 3.9/3.11: passed against pinned Stable main.py and legacy GPIO fixture (https://github.com/petec999/hpi/actions/runs/45788712613).
-- Applied on a NanoPi running an existing Stable-derived 1.4.5_3 installation; service restarted and live pump frames returned. A subsequent restart with the separate MQTT patch also returned valid telemetry.
-- Not yet tested: whole-device reboot, physical pre-exported pin, other boards/backends, pristine Stable install.
-
-This fixes a concrete defect, but its role in the separate WWW regression is unproven.
+- Python 3.9/3.11 regression tests passed against the original Stable 1.4.5 main.py and the legacy GPIO implementation (https://github.com/petec999/hpi/actions/runs/45788712613).
+- Tested on a NanoPi running Stable 1.4.5 with local patches. After applying the fix and restarting the service, pump communication and telemetry worked normally.
+- Further testing on other supported devices and after a full reboot is welcome.
 
 See docs/stable-gpio-reliability.md for verification and rollback.
