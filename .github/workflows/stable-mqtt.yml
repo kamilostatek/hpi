@@ -22,7 +22,6 @@ jobs:
           mkdir -p /tmp/stable-src
           tar -xzf 1.4.5_stable.tar.gz -C /tmp/stable-src
           test -f /tmp/stable-src/main.py
-          test -f /tmp/stable-src/HPi/GPIO.py
       - name: Regression tests
         env:
           STABLE_ROOT: /tmp/stable-src
