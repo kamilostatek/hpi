@@ -28,11 +28,11 @@ Rollback: copy main.py from the exact printed backup directory to /opt/haier/mai
 
 ## Hardware validation — 2026-11-26
 
-Tested on a NanoPi running Stable 1.4.5 with local patches. After applying the fix and restarting the service, the broker acknowledged the publication:
+Tested on a NanoPi running Stable 1.4.5 with local patches. After applying the fix, the broker acknowledged the publication after service restart and full device reboot:
 
     MQTT broker PUBACK health confirmed
 
-Pump telemetry worked normally. Python 3.9/3.11 regression tests passed against the original Stable archive, including simulated timeout and reconnect cooldown: https://github.com/petec999/hpi/actions/runs/45788755974.
+MQTT also connected and received PUBACK during the earlier read-only boot despite initial network unavailability. Pump telemetry worked normally after reboot with persistent read-write storage. Python 3.9/3.11 regression tests passed against the original Stable archive, including simulated timeout and reconnect cooldown: https://github.com/petec999/hpi/actions/runs/45788755974.
 
 Further testing under actual broker failure and recovery conditions, including a stalled PUBACK, is welcome.
 
@@ -40,6 +40,6 @@ Further testing under actual broker failure and recovery conditions, including a
 
 - [x] Unit tests against original Stable source.
 - [ ] Test with real Paho/Mosquitto.
-- [x] Normal startup and broker acknowledgement on NanoPi.
+- [x] Normal startup and broker acknowledgement on NanoPi after service restart and full reboot.
 - [ ] Check without HA.
 - [ ] Verify recovery and absence of reconnect loops.
