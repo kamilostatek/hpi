@@ -39,11 +39,14 @@ class _StableMqttHealth:
             except (RuntimeError, ValueError):
                 ack = False
             if ack:
+                first = self.last_ok is None
                 self.last_ok = now
                 self.pending = None
                 self.sent = None
                 self.next_probe = now + 30
-                if self.warned:
+                if first:
+                    logging.info("MQTT broker PUBACK health confirmed")
+                elif self.warned:
                     logging.info("MQTT broker PUBACK health recovered")
                 self.warned = False
             elif now - self.sent >= 90:
