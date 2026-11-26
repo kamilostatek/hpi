@@ -45,13 +45,13 @@ The original worker recovered only after an extended interruption during a broke
 
 The latest source compatibility revision (e8646100b2e09222d139f42a36ed0022558a3a73) changes the patcher's source matching, not the installed reconnect logic. Both Python 3.9 and 3.11 jobs passed regression tests and the real Paho/Mosquitto outage integration test: https://github.com/petec999/hpi/actions/runs/45797409471
 
-The full-device reboot test above was performed with the first PUBACK patch before the reconnect revision. The stalled-PUBACK recovery path has simulated coverage but has not yet been reproduced on NanoPi with TCP still connected.
+A subsequent full NanoPi reboot with reconnect v2 and persistent read-write storage also passed: 11:11:04 initial OSError, 11:11:05 automatic reconnect, 11:11:06 PUBACK confirmed, 11:11:17 HA heartbeat confirmed. The service was active and UART RX count was 5473. The stalled-PUBACK recovery path has simulated coverage but has not yet been reproduced on NanoPi with TCP still connected.
 
 ## Upstream checklist
 
 - [x] Unit tests against original Stable source.
 - [x] Real Paho/Mosquitto integration test and physical broker outage/recovery.
-- [x] Normal startup and broker acknowledgement on NanoPi after service restart and full reboot.
+- [x] Normal startup and broker acknowledgement on NanoPi after service restart and full reboot with reconnect v2.
 - [ ] Check without HA.
 - [x] Observed bounded reconnect backoff and successful recovery during broker outage.
 - [ ] Physical stalled-PUBACK fault injection.
