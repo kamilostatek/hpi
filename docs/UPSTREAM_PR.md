@@ -10,14 +10,11 @@ A connected MQTT client is not sufficient evidence that the broker recently ackn
 - Request reconnect only after a prior successful acknowledgement, with a 300-second cooldown.
 - Preserve existing backoff/reconnect behavior; no new client, topics, callbacks, HA dependency, or configuration fields.
 
-PUBACK demonstrates broker acknowledgement only, not receipt by HA or another subscriber. This is separate from the optional HA end-to-end watchdog. The patcher validates the original worker structure rather than replacing the Stable archive.
+PUBACK demonstrates broker acknowledgement only, not receipt by HA or another subscriber. The patcher validates the original worker structure rather than replacing the Stable archive.
 
 ## Validation
-- Python 3.9/3.11: passed against pinned Stable archive; simulated ACK, timeout, initial failure, cooldown and shutdown tests (https://github.com/petec999/hpi/actions/runs/45788755974).
-- Hardware startup on NanoPi with existing Stable-derived 1.4.5_3 and independent GPIO fix:
-    10:14:31 MQTT broker PUBACK health confirmed
-    10:14:44 MQTT watchdog OK: HA confirmed heartbeat (failures=0 recoveries=0)
-  Subsequent status snapshot contained complete pump data.
-- Not yet tested: actual broker outage, stalled PUBACK fault injection, recovery interactions with the existing HA watchdog, reboot, clean Stable device without HA.
+- Python 3.9/3.11 regression tests passed against the original Stable 1.4.5 archive, including simulated PUBACK timeout and reconnect cooldown (https://github.com/petec999/hpi/actions/runs/45788755974).
+- Tested on a NanoPi running Stable 1.4.5 with local patches. The broker confirmed PUBACK after service restart, and pump telemetry worked normally.
+- Further testing under actual broker failure and recovery conditions is welcome.
 
 See docs/stable-mqtt-reliability.md for verification and rollback.
