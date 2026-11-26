@@ -80,11 +80,122 @@ class _StableMqttHealth:
                 self.warned = True
 
 '''
+ORIGINAL_LOOP = '''    backoff = 1.0
+    max_backoff = 30.0
+    connected_once = False
+
+    while not mqtt_stop_event.is_set():
+        # (Re)connect if needed
+        try:
+            try:
+                is_conn = bool(getattr(cl, 'is_connected', lambda: False)())
+            except Exception:
+                is_conn = False
+
+            sock_open = getattr(cl, '_sock', None) is not None
+            if (not is_conn) and (not sock_open):
+                try:
+                    cl.connect(str(mqtt_broker_addr), int(mqtt_broker_port))
+                    connected_once = True
+                    backoff = 1.0
+                except Exception:
+                    if not connected_once:
+                        logging.error(colored("MQTT connection error.", "red", attrs=['bold']))
+                        connected_once = True
+                    time.sleep(backoff)
+                    backoff = min(max_backoff, backoff * 1.8)
+                    continue
+
+            rc = cl.loop(timeout=1.0)
+            if rc != mqtt.MQTT_ERR_SUCCESS:
+                # Connection lost or other socket error
+                time.sleep(0.5)
+        except Exception:
+            logging.exception("MQTT worker exception")
+            time.sleep(1.0)
+
+'''
+RECONNECT_MARK = "# STABLE MQTT RECONNECT v2"
+OLD_TICK = """            if rc == mqtt.MQTT_ERR_SUCCESS:
+                try:
+                    _stable_health.tick(cl, time.monotonic(), str(mqtt_topic), mqtt_stop_event)
+                except Exception as exc:
+                    logging.warning("MQTT health check failed: %s",type(exc).__name__)
+            else:
+                _stable_health.reset()
+"""
+NEW_LOOP = '''    # STABLE MQTT RECONNECT v2
+    health = _StableMqttHealth()
+    backoff = 1.0
+    needs_connect = True
+    connack_deadline = None
+    was_connected = False
+    while not mqtt_stop_event.is_set():
+        try:
+            if needs_connect:
+                # Public Paho API closes/replaces any stale transport on connect.
+                # Do not gate retries on private socket state.
+                logging.info("MQTT connection attempt")
+                rc = cl.connect(str(mqtt_broker_addr), int(mqtt_broker_port))
+                if rc != mqtt.MQTT_ERR_SUCCESS:
+                    raise RuntimeError("connect rc=%s" % rc)
+                needs_connect = False
+                connack_deadline = time.monotonic() + 15.0
+                was_connected = False
+
+            if mqtt_stop_event.is_set():
+                break
+            rc = cl.loop(timeout=1.0)
+            if rc != mqtt.MQTT_ERR_SUCCESS:
+                raise RuntimeError("loop rc=%s" % rc)
+
+            if cl.is_connected():
+                if not was_connected:
+                    logging.info("MQTT worker connection established")
+                    backoff = 1.0
+                    was_connected = True
+                    connack_deadline = None
+                health.tick(cl, time.monotonic(), str(mqtt_topic), mqtt_stop_event)
+                # The health probe may deliberately disconnect the client.
+                if not cl.is_connected():
+                    raise RuntimeError("health check requested reconnect")
+            elif was_connected:
+                raise RuntimeError("connection lost")
+            elif connack_deadline is not None and time.monotonic() >= connack_deadline:
+                raise RuntimeError("CONNACK timeout")
+        except Exception as exc:
+            health.reset()
+            needs_connect = True
+            was_connected = False
+            connack_deadline = None
+            if mqtt_stop_event.is_set():
+                break
+            # Do not log credentials or connection addresses.
+            logging.warning("MQTT reconnect scheduled in %.1fs (%s)", backoff,
+                            str(exc) if isinstance(exc, RuntimeError) and
+                            str(exc).startswith(("connect rc=", "loop rc=", "CONNACK timeout",
+                                                 "connection lost", "health check requested reconnect",
+                                                 "external watchdog requested reconnect"))
+                            else type(exc).__name__)
+            mqtt_stop_event.wait(backoff)
+            backoff = min(30.0, backoff * 1.8)
+
+'''
+EXTERNAL_WATCHDOG = '''            if globals().get('_wd_reconnect_request') is cl:
+                globals()['_wd_reconnect_request'] = None
+                if not mqtt_stop_event.is_set() and globals().get('client') is cl and cl.is_connected():
+                    logging.warning('MQTT watchdog: disconnecting MQTT client for reconnect')
+                    cl.disconnect()
+'''
+NEW_EXTERNAL = '''            if globals().get('_wd_reconnect_request') is cl:
+                globals()['_wd_reconnect_request'] = None
+                if not mqtt_stop_event.is_set() and globals().get('client') is cl and cl.is_connected():
+                    logging.warning('MQTT watchdog: disconnecting MQTT client for reconnect')
+                    cl.disconnect()
+                    raise RuntimeError("external watchdog requested reconnect")
+'''
+
 def patch(source):
-    if MARK in source:
-        if source.count(BLOCK)==1 and source.count("    _stable_health = _StableMqttHealth()\n")==1 and source.count("                    _stable_health.tick(cl, time.monotonic(), str(mqtt_topic), mqtt_stop_event)\n")==1:
-            return source
-        raise ValueError("Incomplete or modified MQTT health patch")
     tree=ast.parse(source)
     nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="connect_mqtt"]
     if len(nodes)!=1:
@@ -92,26 +203,41 @@ def patch(source):
     n=nodes[0]
     lines=source.splitlines(keepends=True)
     worker="".join(lines[n.lineno-1:n.end_lineno])
-    init="    while not mqtt_stop_event.is_set():\n"
-    anchor="            rc = cl.loop(timeout=1.0)\n"
-    if worker.count(init)!=1 or worker.count(anchor)!=1:
-        raise ValueError("Unexpected MQTT worker implementation")
-    # Require original worker's local client and socket-based reconnect behavior.
+    before="".join(lines[:n.lineno-1])
+    after="".join(lines[n.end_lineno:])
+    if RECONNECT_MARK in worker:
+        expected=NEW_LOOP.replace("            rc = cl.loop(timeout=1.0)\n",NEW_EXTERNAL+"            rc = cl.loop(timeout=1.0)\n",1)
+        if before.count(BLOCK)!=1 or not (NEW_LOOP in worker or expected in worker):
+            raise ValueError("Modified MQTT v2 patch")
+        return source
+    if MARK in source:
+        if before.count(BLOCK)!=1 or worker.count(OLD_TICK)!=1:
+            raise ValueError("Unknown installed MQTT v1 patch; restore original or known v1 first")
+        worker=worker.replace(OLD_TICK,"",1).replace("    _stable_health = _StableMqttHealth()\n","",1)
+    else:
+        before+=BLOCK+"\n"
+    # Recognize the original worker, or the exact optional HA watchdog hook.
     for key in ("cl.connect(", "cl = globals().get(", "sock_open", "MQTT_ERR_SUCCESS"):
         if key not in worker:
             raise ValueError("Missing worker contract: "+key)
-    if '"/haierpi/connected"' not in source and "'/haierpi/connected'" not in source:
-        raise ValueError("Missing existing availability topic")
-    worker=worker.replace(init,"    _stable_health = _StableMqttHealth()\n"+init,1)
-    worker=worker.replace(anchor,anchor+'''            if rc == mqtt.MQTT_ERR_SUCCESS:
-                try:
-                    _stable_health.tick(cl, time.monotonic(), str(mqtt_topic), mqtt_stop_event)
-                except Exception as exc:
-                    logging.warning("MQTT health check failed: %s",type(exc).__name__)
-            else:
-                _stable_health.reset()
-''',1)
-    result="".join(lines[:n.lineno-1])+BLOCK+"\n"+worker+"".join(lines[n.end_lineno:])
+    start="    backoff = 1.0\n"
+    stop="    # Stop requested\n"
+    if worker.count(start)!=1 or worker.count(stop)!=1:
+        raise ValueError("Unexpected worker boundary")
+    original=worker[worker.index(start):worker.index(stop)]
+    if original.count("            rc = cl.loop(timeout=1.0)\n")!=1:
+        raise ValueError("Unexpected loop layout")
+    if "_wd_reconnect_request" in original:
+        if original.count(EXTERNAL_WATCHDOG)!=1:
+            raise ValueError("Unknown external watchdog hook")
+        replacement=NEW_LOOP.replace("            rc = cl.loop(timeout=1.0)\n",NEW_EXTERNAL+"            rc = cl.loop(timeout=1.0)\n",1)
+    else:
+        replacement=NEW_LOOP
+    # Reject unfamiliar worker logic rather than discarding it.
+    normalized=original.replace(EXTERNAL_WATCHDOG,"")
+    if ast.dump(ast.parse("def _worker():\n"+normalized))!=ast.dump(ast.parse("def _worker():\n"+ORIGINAL_LOOP)):
+        raise ValueError("Unknown original MQTT worker body")
+    result=before+worker.replace(original,replacement,1)+after
     compile(result,"main.py","exec")
     return result
 
