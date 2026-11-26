@@ -22,7 +22,9 @@ jobs:
           mkdir -p /tmp/stable-src
           tar -xzf 1.4.5_stable.tar.gz -C /tmp/stable-src
           test -f /tmp/stable-src/main.py
-          test -f /tmp/stable-src/HPi/GPIO.py
+          # Stable updates main.py but retains the original device GPIO module.
+          mkdir -p /tmp/stable-src/HPi
+          cp tests/fixtures/HPi/GPIO.py /tmp/stable-src/HPi/GPIO.py
       - name: Regression tests
         env:
           STABLE_ROOT: /tmp/stable-src
