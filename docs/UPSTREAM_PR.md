@@ -13,7 +13,7 @@ Stable ships main.py but not HPi/GPIO.py. The patcher validates the observed leg
 
 ## Validation
 - Python 3.9/3.11 regression tests passed against the original Stable 1.4.5 main.py and the legacy GPIO implementation (https://github.com/petec999/hpi/actions/runs/45788712613).
-- Tested on a NanoPi running Stable 1.4.5 with local patches. After applying the fix and restarting the service, pump communication and telemetry worked normally.
-- Further testing on other supported devices and after a full reboot is welcome.
+- Tested on a NanoPi running Stable 1.4.5 with local patches. Pump communication and telemetry worked normally after service restart and a full reboot with the device configured for persistent read-write storage.
+- Further testing on other supported devices is welcome.
 
 See docs/stable-gpio-reliability.md for verification and rollback.
