@@ -86,5 +86,58 @@ class Tests(unittest.TestCase):
         old={n.name:ast.dump(n) for n in ast.parse(core).body if isinstance(n,ast.FunctionDef)}
         new={n.name:ast.dump(n) for n in ast.parse(updated).body if isinstance(n,ast.FunctionDef)}
         self.assertEqual({k for k in old if old[k]!=new[k]},{"connect_mqtt"})
+    def test_upgrade_v1_with_external_hook(self):
+        core=(ROOT/"main.py").read_text()
+        core=core.replace("            rc = cl.loop(timeout=1.0)\n",P["EXTERNAL_WATCHDOG"]+"            rc = cl.loop(timeout=1.0)\n",1)
+        old=core.replace("def connect_mqtt():",P["BLOCK"]+"\ndef connect_mqtt():",1)
+        old=old.replace("    while not mqtt_stop_event.is_set():\n","    _stable_health = _StableMqttHealth()\n    while not mqtt_stop_event.is_set():\n",1)
+        old=old.replace("            rc = cl.loop(timeout=1.0)\n","            rc = cl.loop(timeout=1.0)\n"+P["OLD_TICK"],1)
+        updated=P["patch"](old)
+        self.assertEqual(P["patch"](updated),updated)
+        self.assertIn(P["NEW_EXTERNAL"],updated)
+        self.assertEqual(updated.count(P["BLOCK"]),1)
+
+    def test_worker_recovers_even_with_stale_socket(self):
+        core=P["patch"]((ROOT/"main.py").read_text())
+        node=next(n for n in ast.parse(core).body if isinstance(n,ast.FunctionDef) and n.name=="connect_mqtt")
+        stop=Event()
+        delays=[]
+        class Stop:
+            def is_set(self):
+                return stop.is_set()
+            def wait(self,delay):
+                delays.append(delay)
+        class Fake(Client):
+            _sock=object()
+            _client_id=b"test"
+            def __init__(self):
+                super().__init__()
+                self.connected=False
+                self.attempts=0
+                self.loops=0
+            def connect(self,*args):
+                self.attempts+=1
+                if self.attempts in (2,3):
+                    raise OSError("broker offline")
+                return 0
+            def loop(self,timeout):
+                self.loops+=1
+                if self.loops==1:
+                    self.connected=True
+                    return 0
+                if self.loops==2:
+                    self.connected=False
+                    return 7
+                self.connected=True
+                stop.set()
+                return 0
+        c=Fake()
+        g={"client":c,"mqtt_stop_event":Stop(),"mqtt_broker_addr":"test","mqtt_broker_port":1883,"mqtt_topic":"test","mqtt":SimpleNamespace(MQTT_ERR_SUCCESS=0),"logging":logging,"time":__import__("time")}
+        exec(P["BLOCK"],g)
+        exec(compile(ast.Module(body=[node],type_ignores=[]),"worker","exec"),g)
+        g["connect_mqtt"]()
+        self.assertEqual(c.attempts,4)
+        self.assertEqual(delays,[1.0,1.8,3.24])
+
 if __name__=="__main__":
     unittest.main()
