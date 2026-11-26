@@ -220,11 +220,15 @@ def patch(source):
     for key in ("cl.connect(", "cl = globals().get(", "sock_open", "MQTT_ERR_SUCCESS"):
         if key not in worker:
             raise ValueError("Missing worker contract: "+key)
-    start="\n    backoff = 1.0\n"
-    stop="    # Stop requested\n"
-    if worker.count(start)!=1 or worker.count(stop)!=1:
+    # Locate top-level statements, independent of comment formatting.
+    parsed=ast.parse(worker).body[0]
+    starts=[x for x in parsed.body if isinstance(x,ast.Assign) and
+            any(isinstance(t,ast.Name) and t.id=="backoff" for t in x.targets)]
+    loops=[x for x in parsed.body if isinstance(x,ast.While)]
+    if len(starts)!=1 or len(loops)!=1:
         raise ValueError("Unexpected worker boundary")
-    original=worker[worker.index(start)+1:worker.index(stop)]
+    wl=worker.splitlines(keepends=True)
+    original="".join(wl[starts[0].lineno-1:loops[0].end_lineno])
     if original.count("            rc = cl.loop(timeout=1.0)\n")!=1:
         raise ValueError("Unexpected loop layout")
     if "_wd_reconnect_request" in original:
@@ -236,7 +240,7 @@ def patch(source):
     # Reject unfamiliar worker logic rather than discarding it.
     normalized=original.replace(EXTERNAL_WATCHDOG,"")
     if ast.dump(ast.parse("def _worker():\n"+normalized))!=ast.dump(ast.parse("def _worker():\n"+ORIGINAL_LOOP)):
-        raise ValueError("Unknown original MQTT worker body")
+        raise ValueError("Unknown original MQTT worker body: "+normalized)
     result=before+worker.replace(original,replacement,1)+after
     compile(result,"main.py","exec")
     return result
